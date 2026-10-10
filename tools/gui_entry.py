@@ -25,7 +25,7 @@ def main():  # pythonw 没有控制台；启动异常写入本地日志并通过
                 traceback.print_exc()  # 保留完整异常调用链，弹窗只显示简短错误和日志位置。
                 raise
     except Exception as exc:
-        ctypes.windll.user32.MessageBoxW(None, f"启动失败：{exc}\n详细信息：{log_path}", "AutoDL GPU Watcher", 16)
+        ctypes.windll.user32.MessageBoxW(None, f"启动失败：{exc}\n详细信息：{log_path}", "Auto算力与训练调度", 16)
     finally:
         sys.stdout, sys.stderr = original_streams
 

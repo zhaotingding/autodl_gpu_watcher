@@ -19,10 +19,25 @@ def main(stage_only=False, icon=None):  # 只收集应用代码和依赖，绝�
         data, _, _ = load_icon(icon)
         icon_path = folder / "application.ico"
         icon_path.write_bytes(data)
+    sys.path.insert(0, str(ROOT / "src"))
+    from autodl_watcher import __version__
+    version_path = folder / "version.txt"
+    version_tuple = tuple(map(int, __version__.split("."))) + (0,)
+    version_path.write_text(f"""VSVersionInfo(
+        ffi=FixedFileInfo(filevers={version_tuple!r}, prodvers={version_tuple!r}, mask=0x3f,
+                         flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),
+        kids=[StringFileInfo([StringTable('080404b0', [
+            StringStruct('FileDescription', 'Auto算力与训练调度'),
+            StringStruct('ProductName', 'Auto算力与训练调度'),
+            StringStruct('FileVersion', '{__version__}'),
+            StringStruct('ProductVersion', '{__version__}')])]),
+            VarFileInfo([VarStruct('Translation', [2052, 1200])])])
+""", encoding="utf-8")
     library_bin = Path(sys.prefix) / "Library" / "bin"
     binaries = [(str(library_bin / name), ".") for name in
                 ("libssl-3-x64.dll", "libcrypto-3-x64.dll") if (library_bin / name).is_file()]
-    datas = [(str(ROOT / "src/autodl_watcher/remote_probe.py"), "autodl_watcher")]  # SSH仅发送这份只读标准库探针。
+    datas = [(str(ROOT / "src/autodl_watcher/remote_probe.py"), "autodl_watcher"),
+             (str(ROOT / "src/autodl_watcher/default.ico"), "autodl_watcher")]  # SSH仅发送这份只读标准库探针。
     env = os.environ.copy()
     if library_bin.is_dir():
         env["PATH"] = str(library_bin) + os.pathsep + env.get("PATH", "")  # Conda DLL 必须与打包解释器一致。
@@ -33,7 +48,8 @@ def main(stage_only=False, icon=None):  # 只收集应用代码和依赖，绝�
 pyz = PYZ(a.pure)
 gui = EXE(pyz, a.scripts[:-2] + [a.scripts[-2]], [], exclude_binaries=True,
     name='AutoDLWatcher', debug=False, strip=False, upx=False, console=False,
-    contents_directory='_internal', icon={str(icon_path) if icon_path else None!r})
+    contents_directory='_internal', icon={str(icon_path) if icon_path else None!r},
+    version={str(version_path)!r})
 worker = EXE(pyz, a.scripts[:-2] + [a.scripts[-1]], [], exclude_binaries=True,
     name='AutoDLWorker', debug=False, strip=False, upx=False, console=True,
     contents_directory='.')

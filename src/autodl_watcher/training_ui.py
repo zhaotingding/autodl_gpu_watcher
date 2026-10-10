@@ -138,7 +138,7 @@ def _column(value, width):  # 中文姓名按显示宽度补空格，黑框列�
 def gpu_table(snapshot, name):
     stamp = datetime.fromtimestamp(snapshot["received_at"]).strftime("%H:%M:%S")
     lines = [f"===== {stamp} | {name} | 显存：整卡 / 进程分列 =====",
-             "GPU   VRAM整卡(GiB)  UTIL  TEMP  USER                 PID       进程GiB  PROCESS / CONFIG"]
+             "GPU   VRAM整卡(GiB)  UTIL  TEMP  USER                 PID       进程GiB  PROCESS / CONFIG · 开始时间 · 持续时间"]
     for gpu in snapshot.get("gpus", []):
         rows = [row for row in snapshot.get("gpu_processes", []) if row.get("gpu_index") == gpu["index"]]
         for row in rows or [{}]:
@@ -149,7 +149,8 @@ def gpu_table(snapshot, name):
                 process += " [" + row["config"] + "]"
             lines.append(_column(("容器" if snapshot.get("container") else "GPU") + str(gpu["index"]), 6) + _column(total, 15) + _column(f"{gpu['util']:.0f}%", 6)
                          + _column(f"{gpu['temperature']:.0f}°C", 6) + _column(row.get("user", "—"), 21)
-                         + _column(row.get("pid", "—"), 10) + _column(f"{memory/1024:.2f}" if memory is not None else "—", 9) + process)
+                         + _column(row.get("pid", "—"), 10) + _column(f"{memory/1024:.2f}" if memory is not None else "—", 9) + process
+                         + (" · " + process_time(dict(row, last_alive_at=snapshot.get("observed_at"))) if row else ""))
     if snapshot.get("gpu_error"):
         lines.append(snapshot["gpu_error"])
     if snapshot.get("container"):
@@ -168,6 +169,22 @@ def task_memory(card):
         return f"显存峰值 {peak/1024**3:.2f} GiB（日志）" if peak is not None else "显存 无法核验"
     return f"显存 {value/1024:.2f} GiB"
 
+def process_time(card):
+    started = card.get("started_at")
+    if started is None:
+        return "进程开始 — · 持续时间 —"
+    stamp = datetime.fromtimestamp(started).strftime("%m-%d %H:%M:%S")
+    observed = card.get("last_alive_at")
+    if observed is None:
+        return f"进程开始 {stamp} · 持续时间未确认"
+    elapsed = max(0, int(observed - started))
+    days, rest = divmod(elapsed, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, seconds = divmod(rest, 60)
+    duration = (f"{days}天 " if days else "") + f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"进程开始 {stamp} · 已运行 {duration}（截至最近存活采样）"
+
+
 class TrainingPane(ttk.Frame):
     def __init__(self, parent, service, configure_server, interval, show_gpus=True):
         super().__init__(parent)
@@ -181,8 +198,6 @@ class TrainingPane(ttk.Frame):
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(bar, text="停止", command=self.stop)
         self.stop_button.pack(side="left", padx=4)
-        self.configure_button = ttk.Button(bar, text="设置连接", command=configure_server)
-        self.configure_button.pack(side="right")
         self.summary = ttk.Label(self, text="尚未配置训练连接", wraplength=560)
         self.summary.pack(fill="x", pady=(0, 5))
         if show_gpus:
@@ -291,7 +306,7 @@ class TrainingPane(ttk.Frame):
             frame = self._card("warning" if warning else "idle")
             self._label(frame, "无法确认训练状态" if warning else "无匹配训练进程" if snapshot and state["active"] else "等待训练采集", bold=True)
             if snapshot and state["active"] and not warning:
-                self._label(frame, f"脚本匹配：{state['server'].scripts} · 目录：{state['server'].project or '当前SSH用户'}；可在设置连接中修改。")
+                self._label(frame, f"脚本匹配：{state['server'].scripts} · 目录：{state['server'].project or '当前SSH用户'}；可在全局设置中修改。")
         history_count = sum(bool(card.get("history")) for card in cards)
         if history_count:
             def toggle_history():
@@ -309,6 +324,7 @@ class TrainingPane(ttk.Frame):
             gpu = ",".join(f"#{index}" for index in card.get("gpu_indices", [])) or "待确认"
             self._label(frame, f"PID {card['pid']} · 用户 {card.get('user', '—')} · GPU {gpu} · {task_memory(card)}"
                         + (" · 上次采样" if warning or not state["active"] else ""))
+            self._label(frame, process_time(card))
             if card.get("tmux_session"):
                 self._label(frame, f"tmux：{card['tmux_session']}")
             self._label(frame, card.get("rule_status", "默认监控"), color=COLORS["warning"][1] if "不适用" in card.get("rule_status", "") else "#c0d6cd")

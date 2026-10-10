@@ -126,6 +126,9 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             except (ValueError, OSError, AttributeError):
                 self.status.set("本地偏好读取失败，已使用默认配置")
         self.icons = IconManager(root, self.local)
+        self.settings_window = None
+        self.training.ai.open_settings = self.open_settings
+        self.icons.open_settings = self.open_settings
         self._build()
         self._populate([(item.machine_name, "待刷新", "未核验")
                         for item in self.config.auto_start.targets if item.enabled])
@@ -134,7 +137,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.root.protocol("WM_DELETE_WINDOW", self.close)  # 标题栏关闭按钮也走安全停止流程。
 
     def _build(self):  # 从上到下构建工具栏、服务器表、配置区、操作按钮和日志区。
-        self.root.title(f"AutoDL GPU Watcher · v{__version__}")
+        self.root.title(f"Auto算力与训练调度 · v{__version__}")
         self.root.geometry("1000x800")  # 保留用户设置的初始窗口高度；单位为像素。
         self.root.minsize(820, 660)  # 限制手动缩小时的最小尺寸，避免控件完全挤出窗口。
         style = ttk.Style(self.root)
@@ -165,10 +168,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.notebook = ttk.Notebook(frame)
         self.notebook.pack(fill="both", expand=True, pady=(3, 0))
         style.configure("GlobalAI.TButton", padding=(7, 1))
-        self.ai_settings_button = ttk.Button(frame, text="全局 AI 设置", style="GlobalAI.TButton", command=self.training.ai.configure)
-        self.ai_settings_button.place(relx=1, y=0, anchor="ne")  # 全局入口位于标签栏右侧，不挤占监控日志高度。
-        self.icon_settings_button = ttk.Button(frame, text="应用图标", style="GlobalAI.TButton", command=self.icons.configure)
-        self.icon_settings_button.place(relx=1, x=-105, y=0, anchor="ne")
+        self.settings_button = ttk.Button(frame, text="全局设置", style="GlobalAI.TButton", command=self.open_settings)
+        self.settings_button.place(relx=1, y=0, anchor="ne")
         self.auto_page = ttk.Frame(self.notebook, padding=6)
         self.notebook.add(self.auto_page, text="AutoDL 平台")
         page = self.auto_page
@@ -181,7 +182,6 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.login_button.pack(side="left", padx=5)
         self.login_done = ttk.Button(toolbar, text="已登录并关闭浏览器", command=self.finish_login, state="disabled")
         self.login_done.pack(side="left")
-        ttk.Button(toolbar, text="＋ 添加服务器", command=lambda: self.edit_server()).pack(side="right")
         self.session_label = ttk.Label(page, textvariable=self.session_text, foreground="#7a5a18", wraplength=920)
         self.session_label.pack(anchor="w", pady=(0, 4))
         page.bind("<Configure>", lambda event: self.session_label.configure(wraplength=max(200, event.width - 20)))
@@ -208,28 +208,15 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.table.bind("<<TreeviewSelect>>", lambda event: self._render_gpus())
         self.gpu_panel = ttk.LabelFrame(left, text="物理 GPU", padding=(4, 3))
         self.gpu_panel.pack(fill="x", pady=4)
-        options = ttk.LabelFrame(left, text="AutoDL 监控设置", padding=4)
-        options.pack(fill="x", pady=3)
         self.inputs = []
-        for col, (label, value) in enumerate([("用户", self.user), ("间隔/秒", self.poll)]):
-            ttk.Label(options, text=label).grid(row=0, column=col * 2, sticky="w", padx=2)
-            entry = ttk.Entry(options, textvariable=value, width=12 if col == 0 else 6)
-            entry.grid(row=0, column=col * 2 + 1, sticky="ew", padx=2, pady=3)
-            options.columnconfigure(col * 2 + 1, weight=1)
-            self.inputs.append(entry)
-        self.live_check = ttk.Checkbutton(options, text="启用真实自动开机（会产生费用）", variable=self.live, style="Watcher.TCheckbutton",
-                                          command=lambda: self.convert_no_gpu.set(False) if not self.live.get() else None)
-        self.live_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=2)
-        self.convert_check = ttk.Checkbutton(options, text="关闭本账号全部无卡实例（会中断）", variable=self.convert_no_gpu, style="Watcher.TCheckbutton")
-        self.convert_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=2)
+        self.live_check = self.convert_check = self.save_button = None
+        ttk.Label(left, text="参数及开机设置：右上角“全局设置”").pack(anchor="w", pady=3)
         controls = ttk.Frame(left)
         controls.pack(fill="x", pady=4)
         self.start_button = ttk.Button(controls, text="开始监控", command=self.start, width=8)
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(controls, text="停止监控", command=self.stop, state="disabled", width=8)
         self.stop_button.pack(side="left", padx=4)
-        self.save_button = ttk.Button(controls, text="保存设置", command=self.save, width=8)
-        self.save_button.pack(side="left")
         self.status_label = ttk.Label(page, textvariable=self.status, foreground="#245cc4")
         self.status_label.pack(anchor="w", fill="x", pady=4)
         self.status.trace_add("write", lambda *_: self.status_label.configure(
@@ -246,6 +233,25 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.log.pack(fill="both", expand=True)
         self._server_tabs()
 
+    def build_monitor_settings(self, parent):
+        options = ttk.LabelFrame(parent, text="AutoDL 监控设置", padding=8)
+        options.pack(fill="x", pady=3)
+        self.inputs = []
+        for col, (label, value) in enumerate([("用户", self.user), ("间隔/秒", self.poll)]):
+            ttk.Label(options, text=label).grid(row=0, column=col * 2, sticky="w", padx=2)
+            entry = ttk.Entry(options, textvariable=value, width=12 if col == 0 else 6)
+            entry.grid(row=0, column=col * 2 + 1, sticky="ew", padx=2, pady=3)
+            options.columnconfigure(col * 2 + 1, weight=1)
+            self.inputs.append(entry)
+        self.live_check = ttk.Checkbutton(options, text="启用真实自动开机（会产生费用）", variable=self.live, style="Watcher.TCheckbutton",
+                                          command=lambda: self.convert_no_gpu.set(False) if not self.live.get() else None)
+        self.live_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=2)
+        self.convert_check = ttk.Checkbutton(options, text="关闭本账号全部无卡实例（会中断）", variable=self.convert_no_gpu, style="Watcher.TCheckbutton")
+        self.convert_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=2)
+        self.save_button = ttk.Button(parent, text="保存监控设置", command=self.save)
+        self.save_button.pack(anchor="e", padx=8, pady=8)
+        ttk.Label(parent, text="监控中可以编辑并保存；当前监控保持原设置，下次开始监控生效。", wraplength=700).pack(anchor="w", padx=8)
+
     def _server_tabs(self):
         for server in self.servers:
             if server.entry or server.id in self.external_panes:
@@ -257,7 +263,6 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             options = ttk.Frame(page)
             options.pack(fill="x", pady=4)
             ttk.Label(options, text="采样间隔（秒）").pack(side="left")
-            ttk.Button(options, text="＋ 添加服务器", command=lambda: self.edit_server()).pack(side="right")
             interval = tk.StringVar(value="60")
             ttk.Entry(options, textvariable=interval, width=9).pack(side="left", padx=5)
             pane = TrainingPane(page, self.training, lambda key=server.id: self.edit_server(key), interval.get, show_gpus=True)
@@ -279,15 +284,24 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         server = next((item for item in self.servers if item.entry == entry), None)
         self.edit_server(server.id if server else None, entry)
 
+    def open_settings(self, section="servers"):
+        from .settings_ui import GlobalSettings
+        if self.settings_window is None or not self.settings_window.winfo_exists():
+            self.settings_window = GlobalSettings(self)
+        window = self.settings_window
+        window.tabs.select(window.pages[section])
+        window.deiconify()
+        window.lift()
+        return window
+
     def edit_server(self, server_id=None, entry=""):
         from dataclasses import replace
         server = next((item for item in self.servers if item.id == server_id), None)
         server = server or TrainingServer(entry or uuid.uuid4().hex, entry.removeprefix("autodl-") or "新服务器", "", entry=entry)
-        dialog = tk.Toplevel(self.root)
-        dialog.title("训练监控连接 · 只读SSH")
-        dialog.transient(self.root)
-        form = ttk.Frame(dialog, padding=14)
-        form.pack(fill="both", expand=True)
+        dialog = self.open_settings("servers")
+        form = dialog.server_form
+        for child in form.winfo_children():
+            child.destroy()
         values = {}
         fields = [("name", "显示名称"), ("ssh_alias", "SSH别名（用户.ssh/config）"), ("python", "远程Python路径"),
                   ("project", "项目目录（可选，绝对路径）"), ("scripts", "脚本名/通配符（默认另识别tmux/日志）"), ("stalled_minutes", "无进展提醒（分钟）")]
@@ -317,7 +331,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                     pane.render_key = None
                     pane.render()
                 self._render_gpus()
-                dialog.destroy()
+                dialog.refresh_servers()
+                reason.configure(text="连接已保存；监控中的连接下次启动生效。", foreground="#245c45")
             except (ValueError, OSError) as exc:
                 reason.configure(text=str(exc))
         ttk.Button(form, text="保存连接", command=apply).grid(row=8, column=1, sticky="e", pady=8)
@@ -376,6 +391,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         for entry, slots, target in rows:
             self.table.insert("", "end", iid=entry, values=(entry, slots, target, self._training_status(entry)))  # 用入口名作行 ID，选择结果可直接作为监控参数。
         entries = self.table.get_children()
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.refresh_servers()
         if entries:
             self.table.selection_set(selected if selected in entries else entries[0])
 
@@ -425,8 +442,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             return False
 
     def _busy(self, value):  # 统一切换操作权限；监控时能停止，登录时能确认同步。
-        for button in [self.refresh_button, self.login_button, self.start_button, self.save_button,
-                       self.live_check, self.convert_check, *self.inputs]:
+        for button in [self.refresh_button, self.login_button, self.start_button]:
             button.configure(state="disabled" if value else "normal")
         self.stop_button.configure(state="normal" if value and self.job == "monitor" else "disabled")
         self.login_done.configure(state="normal" if value and self.job == "login" else "disabled")
@@ -596,6 +612,12 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         if self.process is not None and self.job == "login":
             messagebox.showinfo("登录尚未完成", "请先关闭登录浏览器并点击“已登录并关闭浏览器”。", parent=self.root)
         else:
+            if not self.closing:
+                try:
+                    self.icons.sync_executable()
+                except OSError as exc:
+                    messagebox.showerror("EXE图标未同步", str(exc), parent=self.root)
+                    return
             self.closing = True
             self.training.stop_all()
             self.stop()
@@ -678,7 +700,7 @@ def main():  # 同一模块既可作为桌面入口，也可作为无界面的�
     if "--discover" in sys.argv:
         discover()
         return
-    parser = argparse.ArgumentParser(description="AutoDL GPU Watcher 图形界面")
+    parser = argparse.ArgumentParser(description="Auto算力与训练调度 图形界面")
     parser.add_argument("--debug", action="store_true", help="调试开发模式，默认只读且不切换无卡实例")
     args = parser.parse_args()
     if os.name == "nt":

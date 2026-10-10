@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, ttk
 import uuid
@@ -56,6 +57,7 @@ class IconManager:
         self.config = folder / "icon.json"
         self.photos, self.frames = [], []
         self.path, self.message = None, "使用系统默认图标"
+        self.changed = False
         try:
             if self.config.exists():
                 name = json.loads(self.config.read_text(encoding="utf-8")).get("file")
@@ -66,6 +68,14 @@ class IconManager:
         except (OSError, ValueError, tk.TclError) as exc:
             self.path = None
             self.message = f"已保存图标无法加载，使用默认图标：{exc}"
+        if not self.frames:
+            self.apply(load_icon(Path(__file__).with_name("default.ico"))[1])
+        status = folder / "icon-executable-status.json"
+        try:
+            if status.exists():
+                self.message += "\n" + json.loads(status.read_text(encoding="utf-8"))["message"]
+        except (OSError, ValueError):
+            self.message += "\nEXE图标同步记录无法读取；请检查目录实际图标。"
         self.root.bind_all("<Map>", self._mapped, add="+")
 
     def windows(self):
@@ -108,26 +118,34 @@ class IconManager:
                 self.photos, self.frames = [], []
             raise
         self.path, self.message = destination, description
+        self.changed = True
 
     def reset(self):
         self.folder.mkdir(parents=True, exist_ok=True)
         self.config.write_text('{"file": null}', encoding="utf-8")
-        for window in self.windows():
-            window.iconbitmap("")
-        self.photos, self.frames = [], []
+        self.apply(load_icon(Path(__file__).with_name("default.ico"))[1])
         self.path, self.message = None, "已恢复系统默认图标"
+        self.changed = True
+
+    def sync_executable(self):
+        if not self.changed or not getattr(sys, "frozen", False):
+            return
+        executable = self.folder.parent / "AutoDLWatcher.exe"
+        worker = executable.parent / "_internal" / "AutoDLWorker.exe"
+        env = os.environ.copy()
+        env["AUTODL_APP_ROOT"] = str(executable.parent)
+        subprocess.Popen([str(worker), "icon", str(os.getpid())], env=env,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+        self.changed = False
 
     def configure(self):
-        return IconSettings(self)
+        return self.open_settings("icon")
 
 
-class IconSettings(tk.Toplevel):
-    def __init__(self, manager):
-        super().__init__(manager.root)
+class IconSettings(ttk.Frame):
+    def __init__(self, parent, manager):
+        super().__init__(parent)
         self.manager = manager
-        self.title("应用图标 · 所有服务器共用")
-        self.geometry("640x420")
-        self.minsize(600, 390)
         ttk.Label(self, text="选择ICO或PNG，保存后立即设置窗口图标，下次启动自动恢复。", wraplength=590).pack(anchor="w", padx=12, pady=12)
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=12)
@@ -138,7 +156,7 @@ class IconSettings(tk.Toplevel):
         self.description.pack(fill="x", padx=12, pady=10)
         self.preview = ttk.Frame(self)
         self.preview.pack(fill="x", padx=12, pady=6)
-        ttk.Label(self, text="上方预览不代表Windows最终显示效果。\n窗口标题栏和运行中任务栏使用窗口图标；已固定的旧入口可能仍使用旧图标。\n磁盘EXE图标由打包资源决定，需重新打包；本设置不会改写运行中的EXE。\n快捷方式使用当前图标，更换后请重新导出；固定旧入口需重新固定新快捷方式。", wraplength=600).pack(fill="x", padx=12, pady=10)
+        ttk.Label(self, text="上方预览不代表Windows最终显示效果。\n窗口标题栏和运行中任务栏使用窗口图标；已固定的旧入口可能仍使用旧图标。\n磁盘EXE图标在安全关闭程序后同步；重新打开或刷新目录查看。\n快捷方式使用当前图标，更换后请重新导出；固定旧入口需重新固定新快捷方式。", wraplength=600).pack(fill="x", padx=12, pady=10)
         self.status = ttk.Label(self, wraplength=600)
         self.status.pack(fill="x", padx=12, pady=6)
         self.render()
@@ -163,7 +181,7 @@ class IconSettings(tk.Toplevel):
         try:
             self.manager.import_file(path)
             self.render()
-            self.status.configure(text="已保存并设置窗口图标；请查看标题栏和任务栏实际显示。", foreground="#245c45")
+            self.status.configure(text="已设置窗口图标；EXE图标在关闭程序后同步，请刷新目录。", foreground="#245c45")
         except (OSError, ValueError, tk.TclError) as exc:
             self.status.configure(text=f"图标未应用：{exc}", foreground="#b42318")
 
@@ -176,7 +194,7 @@ class IconSettings(tk.Toplevel):
             self.status.configure(text=str(exc), foreground="#b42318")
 
     def shortcut(self):
-        path = filedialog.asksaveasfilename(parent=self, title="另存启动快捷方式", initialfile="AutoDL GPU Watcher.lnk", defaultextension=".lnk", filetypes=[("Windows快捷方式", "*.lnk")])
+        path = filedialog.asksaveasfilename(parent=self, title="另存启动快捷方式", initialfile="Auto算力与训练调度.lnk", defaultextension=".lnk", filetypes=[("Windows快捷方式", "*.lnk")])
         if not path:
             return
         try:

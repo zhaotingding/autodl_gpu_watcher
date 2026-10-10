@@ -23,6 +23,7 @@ class GuiWindowTest(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         self.window = gui.WatcherWindow(self.root)
+        self.window.open_settings("monitor").withdraw()
 
     def tearDown(self):
         if self.window.process is not None:
@@ -46,23 +47,15 @@ class GuiWindowTest(unittest.TestCase):
         self.assertTrue(condition(), "UI 子进程未在期限内完成")
 
 
-    def test_ai_settings_is_global_outside_server_pages(self):
-        self.root.update()
-        button=self.window.ai_settings_button
-        self.assertIs(button.master,self.window.notebook.master)
-        self.assertNotEqual(button.master,self.window.auto_page)
-        self.assertIs(self.window.training.ai.service,self.window.training)
-        self.assertEqual(button.cget("text"),"全局 AI 设置")
-
-    def test_icon_settings_is_global_and_does_not_overlap_ai_button(self):
-        self.root.deiconify();self.root.update()
-        button=self.window.icon_settings_button
-        ai=self.window.ai_settings_button
-        self.assertIs(button.master,ai.master)
-        self.assertLessEqual(button.winfo_rootx()+button.winfo_width(),ai.winfo_rootx())
-        dialog=self.window.icons.configure();self.root.update()
-        self.assertIn('所有服务器共用',dialog.title())
-        dialog.destroy()
+    def test_global_settings_outside_server_pages_and_single_window(self):
+        button = self.window.settings_button
+        self.assertIs(button.master, self.window.notebook.master)
+        self.assertEqual(button.cget("text"), "全局设置")
+        dialog = self.window.open_settings("ai")
+        self.assertIs(dialog, self.window.icons.configure())
+        self.assertEqual(len(dialog.pages), 4)
+        self.assertEqual(len([c for c in self.root.winfo_children() if isinstance(c, tk.Toplevel)]), 1)
+        self.assertIn("Auto算力与训练调度", self.root.title())
 
     def test_startup_schedules_readonly_session_check(self):
         self.root.update()

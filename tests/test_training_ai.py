@@ -143,7 +143,7 @@ class AIUITest(unittest.TestCase):
     def test_global_prompt_save_restore_and_usage_page_without_api(self):
         from autodl_watcher.training_ai import DEFAULT_PROMPT
         with patch('autodl_watcher.training_ai.ai_credentials.read',return_value=''), patch('autodl_watcher.training_ai.requests.Session') as api:
-            dialog=self.assistant.configure()
+            dialog=AISettings(self.root,self.path,self.assistant.reload)
             dialog.prompt.delete('1.0','end');dialog.prompt.insert('1.0','监控所有分支的FID和Dice')
             dialog.save()
             self.assertEqual(self.assistant.config['prompt'],'监控所有分支的FID和Dice')

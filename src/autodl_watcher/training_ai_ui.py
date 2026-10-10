@@ -32,7 +32,7 @@ class AIAssistant:
         self.revision += 1
 
     def configure(self):
-        return AISettings(self.root, self.path, self.reload)
+        return self.open_settings("ai")
 
     def explain(self, server_id, card):
         return AnalysisWindow(self.root, self, server_id, card)
@@ -133,13 +133,10 @@ def profile_text(entry, application="主卡片尚未核验"):
     return "\n".join(lines)
 
 
-class AISettings(tk.Toplevel):
+class AISettings(ttk.Frame):
     def __init__(self, parent, path, on_save=lambda: None):
         super().__init__(parent)
         self.path, self.on_save = path, on_save
-        self.title("全局 AI 设置 · 所有服务器共用")
-        self.geometry("720x650")
-        self.minsize(650, 570)
         self.variables = {}
         error = ""
         try:

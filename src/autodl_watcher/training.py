@@ -522,6 +522,7 @@ class TrainingTracker:
             else:
                 level, status = "success", "正在测试" if progress["phase"] == "test" else "正在训练"
             card = dict(task, progress=progress, level=level, status=status, marker=marker,
+                        last_alive_at=now if alive else previous.get("last_alive_at"),
                         advanced_at=advanced_at, rule_status=rule_status, log_path=primary["path"] if primary else "",
                         details=(primary["tail"] if primary.get("gap") else primary["head"] + primary["tail"]) if primary else "")
             if primary:

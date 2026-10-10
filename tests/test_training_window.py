@@ -156,10 +156,10 @@ class TrainingWindowTest(unittest.TestCase):
         old = state["server"]
         window.configure_training("autodl-203-1")
         dialog = next(child for child in self.root.winfo_children() if isinstance(child, tk.Toplevel))
-        fields = [child for child in descendants(dialog) if isinstance(child, gui.ttk.Entry)]
+        fields = [child for child in descendants(dialog.server_form) if isinstance(child, gui.ttk.Entry)]
         fields[1].delete(0, "end"); fields[1].insert(0, "replacement")
         next(child for child in descendants(dialog) if isinstance(child, gui.ttk.Button) and child.cget("text") == "保存连接").invoke()
-        self.assertFalse(dialog.winfo_exists())
+        self.assertTrue(dialog.winfo_exists())
         self.assertEqual(load_servers(window.server_file)[0].ssh_alias, "replacement")
         self.assertEqual(state["server"], old)
         self.assertTrue(state["active"] and state["busy"])

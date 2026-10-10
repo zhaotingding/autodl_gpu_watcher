@@ -60,8 +60,9 @@ class Version081Test(unittest.TestCase):
     def test_container_pid_cannot_be_assigned_even_if_local_pid_has_same_number(self):
         apps = [dict(uuid="gpu", pid=123, memory_used=7000, process_name="python")]
         with patch.object(remote_probe.os, "getuid", side_effect=AssertionError("must not match container UID"), create=True):
-            row = remote_probe.public_gpu_processes([dict(uuid="gpu", index=0)], apps, True)[0]
+            row = remote_probe.public_gpu_processes([dict(uuid="gpu", index=0)], apps, True, 9000, 100)[0]
         self.assertFalse(row["own"])
+        self.assertNotIn("started_at", row)
         self.assertEqual(row["user"], "宿主用户未知")
         self.assertEqual(row["memory_used"], 7000)
 
@@ -75,9 +76,10 @@ class Version081Test(unittest.TestCase):
                 return folder if str(value) == "/proc" else real_path(value)
             apps = [dict(uuid="gpu", pid=123, memory_used=7000, process_name="python")]
             with patch.object(remote_probe, "Path", side_effect=path), patch.object(remote_probe.os, "getuid", return_value=99, create=True), patch.object(remote_probe, "pwd", SimpleNamespace(getpwuid=lambda uid: SimpleNamespace(pw_name="other-user")), create=True):
-                row = remote_probe.public_gpu_processes([dict(uuid="gpu", index=0)], apps, False)[0]
+                row = remote_probe.public_gpu_processes([dict(uuid="gpu", index=0)], apps, False, 9000, 100)[0]
             self.assertEqual((row["user"], row["process"], row["config"]), ("other-user", "train.py", "config.yaml"))
             self.assertFalse(row["own"])
+            self.assertEqual(row["started_at"], 9001)
             self.assertNotIn("PRIVATE-VALUE", json.dumps(row))
             self.assertNotIn("logs", row)
 

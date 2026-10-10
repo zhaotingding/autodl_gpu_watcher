@@ -174,7 +174,7 @@ def query_gpu():
 
 
 
-def public_gpu_processes(gpus, apps, container):  # 其他用户只读系统允许的进程元信息，不读取其训练日志或环境变量。
+def public_gpu_processes(gpus, apps, container, boot_time, ticks):  # 其他用户只读系统允许的进程元信息，不读取其训练日志或环境变量。
     rows = []
     devices = {gpu["uuid"]: gpu["index"] for gpu in gpus}
     for app in apps:
@@ -194,6 +194,8 @@ def public_gpu_processes(gpus, apps, container):  # 其他用户只读系统允�
                             break
                 if before != (path / "stat").read_text().rsplit(")", 1)[1].split()[19]:
                     row.update(user="未知", own=False, process="进程已变化", config="")
+                else:
+                    row["started_at"] = boot_time + int(before) / ticks
             except (OSError, ValueError, IndexError, KeyError):
                 row["config"] = ""  # 权限不足仍显示NVML已返回的GPU/PID/显存，用户名可能已可核验。
         else:
@@ -225,7 +227,7 @@ def collect(request):  # 整次远端请求仅扫描本人进程和已关联日�
         container = container or bool(re.search("docker|kubepods|lxc|containerd", Path("/proc/1/cgroup").read_text()))
     except OSError:
         container = True  # 无法核验命名空间时不猜GPU进程归属。
-    process_rows = public_gpu_processes(gpus, apps, container)
+    process_rows = public_gpu_processes(gpus, apps, container, boot_time, ticks)
     discover_evidence(processes, request.get("project", ""), tmux_panes(),
                       {row["pid"] for row in process_rows if row["own"]} if not container else set())
     roots = training_roots(processes, request.get("scripts", ["train.py", "trainer.py", "train_*.py"]), request.get("project", ""))

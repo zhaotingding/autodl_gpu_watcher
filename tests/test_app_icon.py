@@ -145,7 +145,7 @@ class WindowIconTest(unittest.TestCase):
         self.manager.import_file(self.path);self.root.deiconify();self.root.update()
         gc.collect();self.assert_loaded(self.root)
         self.assertEqual(self.manager.path.read_bytes(),self.path.read_bytes())
-        dialog=IconSettings(self.manager);self.root.update();self.assert_loaded(dialog)
+        dialog=tk.Toplevel(self.root);IconSettings(dialog,self.manager).pack();self.root.update();self.assert_loaded(dialog)
         replacement=self.folder/'replacement.ico';authored_icon(replacement,((16,'#fed010'),(32,'#ae1080'),(256,'#30c090')))
         self.manager.import_file(replacement);gc.collect();self.root.update()
         self.assert_loaded(self.root,(254,208,16),(174,16,128));self.assert_loaded(dialog,(254,208,16),(174,16,128))
