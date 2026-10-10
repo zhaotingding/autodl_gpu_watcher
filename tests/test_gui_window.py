@@ -57,6 +57,20 @@ class GuiWindowTest(unittest.TestCase):
         self.assertEqual(len([c for c in self.root.winfo_children() if isinstance(c, tk.Toplevel)]), 1)
         self.assertIn("Auto算力与训练调度", self.root.title())
 
+    def test_ai_checkbox_uses_tick_indicator_and_keeps_opt_in_semantics(self):
+        dialog=self.window.open_settings("ai")
+        page=dialog.pages["ai"]
+        def controls(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from controls(child)
+        check=next(child for child in controls(page) if isinstance(child, gui.ttk.Checkbutton))
+        self.assertEqual(check.cget("style"),"Watcher.TCheckbutton")
+        self.assertFalse(page.auto.get())
+        check.invoke();self.assertTrue(page.auto.get())
+        check.invoke();self.assertFalse(page.auto.get())
+        self.assertIn('Watcher.indicator', str(gui.ttk.Style(self.root).layout(check.cget('style'))))
+
     def test_startup_schedules_readonly_session_check(self):
         self.root.update()
         self.refresh_mock.assert_called_once()

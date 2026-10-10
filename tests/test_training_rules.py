@@ -100,6 +100,42 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual(card['progress']['step'],19000)
         self.assertEqual(card['progress']['train']['metrics']['loss'],.05)
 
+    def test_local_profile_keeps_validation_datasets_and_dynamic_metrics(self):
+        from autodl_watcher.training_rules import local_profile
+        train='2026-10-10T10:00:00 TRAIN {"pid":10,"epoch":2,"steps":40,"steps_total":100,"loss":0.1}'
+        test='2026-10-10T10:01:00 EVAL {"pid":10,"status":"evaluating","dataset":"custom","step":20,"metrics":{"Dice":0.8}}'
+        profile=local_profile(train+'\n'+test,10)
+        events=parse_rules(profile,train.replace('10:00:00','10:02:00').replace('40','80')+'\n'+test.replace('0.8','0.9,"FID":12.5'),10)
+        self.assertEqual(events[0]['step'],80)
+        self.assertEqual(events[1]['phase'],'test')
+        self.assertEqual(events[1]['dataset'],'custom')
+        self.assertEqual(events[1]['metrics']['FID'],12.5)
+        self.assertIsNone(local_profile(train,99))
+        self.assertIsNone(local_profile('trace {"pid":10,"epoch":2,"indexes":[1,2],"loss":0.1}',10))
+        self.assertIsNone(local_profile('a completely unknown training format',10))
+
+    def test_cache_progress_log_wins_over_newer_trace_and_local_rule_reuses_it(self):
+        from autodl_watcher.training_rules import local_profile
+        line='2026-10-10T16:34:42+08:00 CACHE {"status":"caching","pid":10,"steps":15600,"steps_total":21576,"frames":249600,"parameter_updates":0}'
+        value=snapshot(line)
+        log=value['tasks'][0]['logs'][0];log['path']='/project/train_runner.log'
+        trace=dict(log,path='/project/cache_trace.jsonl',head='{"step":15601,"epoch":8,"indexes":[1,2],"image_sha256":"trace-only"}',modified_at=log['modified_at']+1)
+        value['tasks'][0]['logs'].append(trace)
+        tracker=TrainingTracker(TrainingServer('s','s','host'))
+        card=tracker.update(value)['cards'][0]
+        self.assertEqual(card['log_path'],log['path'])
+        self.assertNotIn('trace-only',card['details'])
+        profile=local_profile(card['details'],10)
+        self.assertEqual(profile['rules'][0]['phase'],'unknown')
+        tracker.rule_lookup=lambda t:{'profile':profile,'log_path':log['path']}
+        value['tasks'][0]['logs'][0]['head']=line.replace('15600','15700')
+        card=tracker.update(value)['cards'][0]
+        self.assertIn('专用规则已启用',card['rule_status'])
+        self.assertEqual(card['progress']['step'],15700)
+        self.assertEqual(card['status'],'进度可读 · 阶段未确认')
+        self.assertEqual(card['progress']['observations']['metrics']['parameter_updates'],0)
+        self.assertEqual(card['progress']['phase'],'unknown')
+
     def test_rule_identity_isolated_by_server_and_process_start(self):
         s=TrainingServer('s','s','host')
         task={'key':'boot:10:100'}
@@ -144,6 +180,50 @@ class RuleAutomationTest(unittest.TestCase):
             self.assertIn('429',self.service.states['s']['snapshot']['cards'][0]['rule_status'])
             self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
             self.ai.tick();self.assertEqual(api.call_count,1)
+
+    def test_failed_manual_update_preserves_applied_rule_during_request_and_after_restart(self):
+        card=self.service.states['s']['snapshot']['cards'][0]
+        identity=task_identity(self.server,card)
+        self.ai.store.put(identity,{'profile':PROFILE,'log_path':card['log_path'],'message':'专用规则已生成'})
+        from threading import Event
+        release=Event()
+        def fail(*args):
+            release.wait(3)
+            raise AnalysisError('AI返回空规则')
+        with patch('autodl_watcher.training_ai_ui.analyze',side_effect=fail) as api:
+            self.ai.generate('s',card,LINE)
+            current=self.service.states['s']['snapshot']['cards'][0]
+            self.assertIn('专用规则已启用',current['rule_status'])
+            self.assertEqual(current['progress']['step'],40)
+            release.set();self.wait()
+            current=self.service.states['s']['snapshot']['cards'][0]
+            self.assertIn('保留原专用规则',current['rule_status'])
+            self.assertNotIn('继续默认监控',current['rule_status'])
+            self.assertEqual(self.ai.entry('s',card)['profile'],PROFILE)
+            self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
+            for _ in range(5):self.ai.tick()
+            api.assert_called_once()
+            self.service.states['s']['snapshot']=self.service.states['s']['tracker'].update(snapshot(LINE.replace('40','80')))
+            self.assertEqual(self.service.states['s']['snapshot']['cards'][0]['progress']['step'],80)
+
+    def test_empty_ai_local_fallback_does_not_replace_existing_ai_profile(self):
+        card=self.service.states['s']['snapshot']['cards'][0]
+        self.ai.store.put(task_identity(self.server,card),{'profile':PROFILE,'log_path':card['log_path']})
+        with patch('autodl_watcher.training_ai_ui.analyze',return_value={'profile':{'name':'local','rules':[]},'rule_origin':'local'}) as api:
+            self.ai.generate('s',card,LINE);self.wait()
+        self.assertEqual(self.ai.entry('s',card)['profile'],PROFILE)
+        self.assertIn('保留原专用规则',self.service.states['s']['snapshot']['cards'][0]['rule_status'])
+        api.assert_called_once()
+
+    def test_interrupted_update_reloads_original_rule_without_paid_retry(self):
+        card=self.service.states['s']['snapshot']['cards'][0]
+        self.ai.store.put(task_identity(self.server,card),{'profile':PROFILE,'log_path':card['log_path'],'message':'正在更新专用规则','attempted':True})
+        self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
+        with patch('autodl_watcher.training_ai_ui.analyze') as api:
+            self.ai.tick();self.service.reparse('s');api.assert_not_called()
+        status=self.service.states['s']['snapshot']['cards'][0]['rule_status']
+        self.assertIn('专用规则已启用',status)
+        self.assertIn('上次规则请求未完成',status)
 
     def test_global_config_applies_to_new_server_but_rules_do_not_cross(self):
         self.ai.config["prompt"] = "提取新指标FID与所有验证数据集"

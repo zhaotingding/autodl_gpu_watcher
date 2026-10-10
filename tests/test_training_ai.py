@@ -96,6 +96,24 @@ class AIBackendTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_result(json.dumps({**RESULT,'command':'whoami'}),SOURCE)
 
+    def test_empty_ai_rules_build_verified_local_profile_once_and_keep_usage(self):
+        from test_training_rules import LINE
+        from autodl_watcher.training_rules import parse_rules
+        source='TRAIN {"pid":10,"epoch":2,"steps":40,"steps_total":100,"loss":0.1,"custom_quality":0.81}'
+        final=sse({'type':'response.completed','response':{'status':'completed','usage':{'input_tokens':6954,'output_tokens':279},
+                  'output':[{'content':[{'type':'output_text','text':'{"name":"unknown","rules":[]}'}]}]}})
+        with patch('autodl_watcher.training_ai.ai_credentials.read',return_value='test-key'),patch('autodl_watcher.training_ai.requests.Session') as factory:
+            response=factory.return_value.__enter__.return_value.post.return_value.__enter__.return_value
+            response.status_code=200;response.iter_lines.return_value=[final]
+            result=analyze(CONFIG,source,10)
+            factory.return_value.__enter__.return_value.post.assert_called_once()
+        self.assertEqual(result['rule_origin'],'local')
+        self.assertEqual(result['call']['tokens']['input'],6954)
+        event=parse_rules(result['profile'],source.replace('40','60').replace('0.81','0.9'),10)[0]
+        self.assertEqual(event['step'],60)
+        self.assertEqual(event['metrics']['custom_quality'],.9)
+        self.assertIn('未自动重试',result['generation_note'])
+
     def test_standard_and_unknown_returned_tier(self):
         result,call=self.call([completed()],{**CONFIG,'service_tier':'default'})
         self.assertEqual(call.kwargs['json']['service_tier'],'default')

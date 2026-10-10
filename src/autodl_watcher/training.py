@@ -457,7 +457,7 @@ class TrainingTracker:
             previous = self.known.get(key, {})
             logs = [item for item in task.get("logs", []) if "error" not in item]
             parsed = [(log, parse_progress(log_text(log), snapshot.get("utc_offset", "+0000"), expected_pid=task["pid"])) for log in logs]
-            primary, progress = max(parsed, key=lambda pair: (pair[1]["phase"] != "unknown", Path(pair[0]["path"]).name == "training.log", pair[0]["modified_at"])) if parsed else (None, previous.get("progress", parse_progress("")))
+            primary, progress = max(parsed, key=lambda pair: (pair[1]["phase"] != "unknown", pair[1]["progress_line"] is not None, Path(pair[0]["path"]).name == "training.log", pair[0]["modified_at"])) if parsed else (None, previous.get("progress", parse_progress("")))
             rule_status = "默认监控"
             entry = self.rule_lookup(dict(task, log_path=primary["path"] if primary else "")) if self.rule_lookup else None
             if entry:
@@ -485,6 +485,8 @@ class TrainingTracker:
                     partial = adapted["progress_line"] is not None and adapted["progress_line"] not in {index for index, _ in events}
                     progress = adapted
                     rule_status = "专用规则已启用：" + entry["profile"]["name"]
+                    if entry.get("message", "").startswith(("更新失败", "正在更新", "规则保存失败")):
+                        rule_status += " · " + entry["message"]
                     if partial:
                         rule_status += " · 最新未覆盖行使用默认解析"
                 except (ValueError, TypeError, KeyError) as exc:
@@ -516,7 +518,7 @@ class TrainingTracker:
             elif progress["phase"] == "between":
                 level, status = "warning", "轮次结束 · 等待后续日志"
             elif not primary or progress["phase"] == "unknown":
-                level, status = "warning", "进程存活 · 训练进度不可读"
+                level, status = "warning", "进度可读 · 阶段未确认" if primary and progress["progress_line"] is not None else "进程存活 · 训练进度不可读"
             elif now - advanced_at > self.server.stalled_minutes * 60:
                 level, status = "warning", "长时间无新进度 · 待核查"
             else:

@@ -57,3 +57,6 @@
 - v0.8.4复用一个已认证OpenSSH进程按行采样，连接失败仅主调度按60/120/240/300秒退避，不叠加线程重拨；停止仅关本对象SSH，不杀共享SSH/VS Code。MaxStartups横幅须 `-v`进入stderr，仅限量内存诊断；60秒采样/15秒保活均非重新登录。2026-10-03在203/4090实测1连接3采样及20秒未认证释放：`v0.8.4/`；回归 `tests/test_v084.py`。
 
 - EXE图标同步（2026-10-10，v0.9.0）：覆盖v0.8.9“运行时不改写EXE”的限制。窗口先热更换，自有worker等待GUI进程退出后更新EXE副本的RT_ICON/RT_GROUP_ICON；更新PE资源必须保留并在新的节区末尾重新附加PyInstaller归档，否则新EXE可能无法启动。更新前备份.ui/icon-executable-backup.exe，Windows通知后刷新目录，不删除缓存或固定项。真实打包worker更新、默认图标恢复、EXE重开及Shell/窗口像素（实际验证）；用户当前ICO在Explorer大图标、标题栏、任务栏实显确认。证据runtime/validation/v090/hot-report.json、helper-shell-report.json、reset-report.json、explorer-final.png。360项完整离线回归，全局设置与进程时长为隔离Tk模拟采样验证，20项个人配置/规则/账本/图标在安装时逐字节保持；未修改远端训练，零付费AI。
+
+- 规则更新空返回（2026-10-10，v0.9.0.1）：原generate在请求前覆盖整个缓存，导致有效profile在失败时丢失；现仅替换同一任务/同一日志的新有效结果，更新中、失败及未完成重开保留原profile，按采样继续提取。首次空rules只对已有解析器识别的结构化事件生成经原样例验证的本地规则，并明确标明来源；未知格式仍默认监控，不自动重试收费请求。证据runtime/validation/v0901/ui-report.json、preserved-card.png、full-tests.txt（367项离线回归及Tk模拟SSE，零真实AI调用）；不能据此保证模型不会返回空规则。
+- 日志选择（2026-10-10，v0.9.0.1）：203/PID897873实际处于CACHE/caching准备阶段，train_runner.log有steps/steps_total；cache_trace.jsonl只有索引哈希、mtime更晚。旧primary在phase都unknown时按mtime选追踪文件，导致6954输入Token的AI返回空rules。现优先已有解析器确认progress_line的日志，再按文件名/mtime；不靠文件名猜阶段。证据runtime/validation/v0901/live-before.json（一次实际只读采样）、本地回放与回归tests/test_training_rules.py；未重新发起真实AI。

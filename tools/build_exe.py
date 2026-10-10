@@ -22,7 +22,7 @@ def main(stage_only=False, icon=None):  # 只收集应用代码和依赖，绝�
     sys.path.insert(0, str(ROOT / "src"))
     from autodl_watcher import __version__
     version_path = folder / "version.txt"
-    version_tuple = tuple(map(int, __version__.split("."))) + (0,)
+    version_tuple = tuple(map(int, __version__.split("."))) + (0,) * (4 - len(__version__.split(".")))
     version_path.write_text(f"""VSVersionInfo(
         ffi=FixedFileInfo(filevers={version_tuple!r}, prodvers={version_tuple!r}, mask=0x3f,
                          flags=0, OS=0x40004, fileType=1, subtype=0, date=(0, 0)),

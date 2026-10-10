@@ -15,6 +15,10 @@ class RuleError(ValueError):
     pass
 
 
+class EmptyRulesError(RuleError):
+    pass
+
+
 def template_pattern(template):
     parts, offset, names = [], 0, set()
     for match in re.finditer(r"\{([A-Za-z_]\w*):(number|word|json)\}", template):
@@ -113,7 +117,7 @@ def validate_profile(value, source, pid=None):
         raise RuleError("规则须包含名称和 rules，不能包含代码或命令")
     rules = value.get("rules")
     if rules == []:
-        raise RuleError("AI返回空规则，未生成可用监控规则；继续默认监控，未自动重试")
+        raise EmptyRulesError("AI返回空规则，未生成可用监控规则；继续默认监控，未自动重试")
     if not isinstance(rules, list) or not 1 <= len(rules) <= 8:
         raise RuleError("规则数量须为1到8条")
     for rule in rules:
@@ -141,6 +145,60 @@ def validate_profile(value, source, pid=None):
         if not example or example not in source.splitlines() or not extract(rule, example, pid):
             raise RuleError("规则无法从所附真实日志样例提取字段")
     return value
+
+
+def local_profile(source, pid=None):
+    """AI空返回时，复用已识别事件生成字段规则；不猜测未知文本含义。"""
+    from .training import _generic_event, _structured_event, _METADATA
+    rules = []
+    for line in source.splitlines():
+        start = line.find("{")
+        values = dictionary(line[start:]) if start >= 0 else None
+        if not values or any(name in values for name in ("indexes", "image_sha256", "rng_sha256")):
+            continue
+        if pid is not None and values.get("pid", pid) != pid:
+            continue
+        event = _generic_event(line, _structured_event(line))
+        phase = event.get("phase", event.get("event"))
+        if phase not in {"train", "test", "unknown"} or not event.get("metrics"):
+            continue
+        fields = {name: name for name in FIELDS if name in values}
+        for name, aliases in (("step", ("steps", "global_step", "iteration", "iter")),
+                              ("total_steps", ("steps_total",))):
+            if name not in fields:
+                fields.update({name: next((key for key in aliases if key in values), "")})
+                if not fields[name]:
+                    del fields[name]
+        if "dataset" not in fields and isinstance(values.get("tag"), str):
+            fields["dataset"] = "tag"
+        metrics = {}
+        def paths(data, prefix="", label=""):
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    paths(value, prefix + key + ".", label + key + "/")
+                elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                    name = label + key
+                    if not label and key in _METADATA:
+                        continue
+                    display = name.removeprefix("metrics/")
+                    if display in event["metrics"]:
+                        metrics[display] = prefix + key
+        paths(values)
+        prefix = STAMP.sub("", line[:start]).strip()
+        rule = {"format": "json", "contains": prefix.split()[-1] if prefix else "",
+                "where": {name: values[name] for name in ("status", "phase", "event") if isinstance(values.get(name), str)},
+                "phase": phase, "fields": fields, "metrics": dict(list(metrics.items())[:30]), "example": line}
+        if isinstance(values.get("metrics"), dict):
+            rule["metrics_path"] = "metrics"
+        if "steps_per_arm" in values:  # 已有P03协议从0开始。
+            rule["fields"]["step"] = "steps_per_arm"
+            rule["epoch_offset"] = 1
+        if extract(rule, line, pid) and not any({k: v for k, v in old.items() if k != "example"} ==
+                                               {k: v for k, v in rule.items() if k != "example"} for old in rules):
+            rules.append(rule)
+            if len(rules) == 8:
+                break
+    return validate_profile({"name": "本地结构化日志专用规则", "rules": rules}, source, pid) if rules else None
 
 
 def parse_rules(profile, text, pid, *, with_lines=False):

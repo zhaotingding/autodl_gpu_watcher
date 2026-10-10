@@ -59,7 +59,11 @@ class AIAssistant:
         server = self.service.states[server_id]["server"]
         identity = task_identity(server, card)
         # 请求前落盘，防止断流/重启后把同一个付费请求再次自动发送。
-        entry = {"message": "默认监控 · 正在生成专用规则", "attempted": True, "log_path": card["log_path"]}
+        entry = dict(self.store.entries.get(identity, {}))
+        if entry.get("log_path") != card["log_path"]:
+            entry.pop("profile", None)
+        entry.update(message="正在更新专用规则" if entry.get("profile") else "默认监控 · 正在生成专用规则",
+                     attempted=True, log_path=card["log_path"])
         self.store.put(identity, entry)
         self.busy = identity
         self.revision += 1
@@ -87,13 +91,20 @@ class AIAssistant:
             return
         self.busy = None
         entry = dict(self.store.entries[identity])
-        entry["message"] = "默认监控 · " + error if error else "专用规则已生成"
+        if error:
+            entry["message"] = ("更新失败，保留原专用规则 · " + error.replace("继续默认监控，", "").replace("；继续默认监控", "")
+                                if entry.get("profile") else "默认监控 · " + error)
+        else:
+            entry["message"] = value.get("generation_note", "专用规则已生成")
         if value:
+            if value.get("rule_origin") == "local" and entry.get("profile"):
+                entry["message"] = "更新失败，AI返回空规则；保留原专用规则，未自动重试"
+                value = {key: item for key, item in value.items() if key not in {"profile", "rule_origin", "generation_note"}}
             entry.update(value)
         try:
             self.store.put(identity, entry)
         except OSError:
-            entry = {"attempted": True, "message": "默认监控 · 规则保存失败，请检查本地目录"}
+            entry = dict(self.store.entries[identity], attempted=True, message="规则保存失败，保留原监控；请检查本地目录")
             self.store.entries[identity] = entry
         self.revision += 1
         self.service.reparse(server_id)  # 仅重解析最近样本；不发SSH，不伪造新的采集时间。
@@ -161,7 +172,7 @@ class AISettings(ttk.Frame):
         self.key = ttk.Entry(connection, show="●")
         self.key.grid(row=4, column=1, padx=8, pady=5, sticky="ew")
         self.auto = tk.BooleanVar(value=config.get("auto_generate", False))
-        ttk.Checkbutton(connection, text="新训练自动生成监控规则（每任务一次，会发送日志并产生费用）", variable=self.auto).grid(row=5, column=0, columnspan=2, padx=8, pady=6, sticky="w")
+        ttk.Checkbutton(connection, text="新训练自动生成监控规则（每任务一次，会发送日志并产生费用）", variable=self.auto, style="Watcher.TCheckbutton").grid(row=5, column=0, columnspan=2, padx=8, pady=6, sticky="w")
         ttk.Label(connection, text="适用于 AutoDL、4090 和以后新增的所有服务器；任务规则分别保存。\nflex 为弹性等级，default 为 Standard；失败不自动提价重试。\n密钥独立存于 Windows 凭据管理器，留空保留此地址已存密钥。\n仅生成规则时调用AI；日常采样使用本地规则。保存不代表API验证成功。", wraplength=620).grid(row=6, column=0, columnspan=2, padx=8, pady=8, sticky="w")
         ttk.Button(connection, text="删除此地址密钥", command=self.delete_key).grid(row=7, column=1, sticky="e", padx=8)
         ttk.Label(prompt, text="所有服务器生成规则时共用。保存后用于后续请求；已有规则需手动更新。\n固定JSON格式契约由程序补充；这里配置指标与显示需求，不填写Shell命令。", wraplength=620).pack(anchor="w", pady=6)

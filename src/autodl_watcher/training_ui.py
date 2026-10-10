@@ -34,8 +34,9 @@ class TrainingService:  # 每台服务器最多一个只读请求；线程只投
             entry = self.ai.store.entries.get(identity)
             if not entry and self.ai.store.error:
                 return {"message": "默认监控 · " + self.ai.store.error}
-            if entry and "正在生成" in entry.get("message", "") and self.ai.busy != identity:
-                return dict(entry, message="默认监控 · 上次规则请求未完成，可手动重试")
+            if entry and any(text in entry.get("message", "") for text in ("正在生成", "正在更新")) and self.ai.busy != identity:
+                return dict(entry, message="更新失败，保留原专用规则 · 上次规则请求未完成，可手动重试" if entry.get("profile")
+                            else "默认监控 · 上次规则请求未完成，可手动重试")
             return entry
         return None
 
