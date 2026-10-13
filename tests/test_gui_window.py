@@ -274,25 +274,46 @@ class GuiWindowTest(unittest.TestCase):
         self.assertLess(self.window.table.winfo_width(), 350)
         self.assertLess(self.window.table.winfo_height(), 170)
 
-    def test_normal_mode_defaults_to_live_and_debug_defaults_to_readonly(self):
-        self.assertTrue(self.window.live.get())
-        self.assertTrue(self.window.convert_no_gpu.get())
-        self.assertIn("--dry-run", self.window._command())  # 未核验真实实例前不启用电源。
-        self.window.table.set(self.window.selected_entry(), "target", "可开机")
-        self.assertIn("--live", self.window._command())
-        self.assertIn("全部无卡实例", self.window.convert_check["text"])
-        self.window.live_check.invoke()  # 取消真实开机也取消无卡关机，避免不一致的只读参数。
+    def test_normal_mode_defaults_to_monitor_only_and_debug_stays_readonly(self):
         self.assertFalse(self.window.live.get())
         self.assertFalse(self.window.convert_no_gpu.get())
-        self.assertIn("--dry-run", self.window._command())
+        self.window.table.set(self.window.selected_entry(), "target", "可开机")
+        self.assertIn("--monitor-only", self.window._command())
+        self.window.live_check.invoke()
+        self.assertTrue(self.window.live.get())
+        self.assertIn("--live", self.window._command())
+        self.window.convert_no_gpu.set(True)
+        self.window.live_check.invoke()
+        self.assertFalse(self.window.live.get())
+        self.assertFalse(self.window.convert_no_gpu.get())
+        self.assertIn("--monitor-only", self.window._command())
+
+    def test_saved_power_options_and_interval_survive_restart(self):
+        for live, convert in ((False, False), (True, False), (True, True)):
+            with self.subTest(live=live, convert=convert):
+                self.window.table.set(self.window.selected_entry(), "target", "可开机")
+                self.window.live.set(live)
+                self.window.convert_no_gpu.set(convert)
+                self.window.poll.set("120")
+                self.window.user.set("保存用户名")
+                self.assertTrue(self.window.save())
+                saved = json.loads((self.folder / ".ui/preferences.json").read_text(encoding="utf-8"))
+                self.assertEqual((saved["live"], saved["convert_no_gpu"]), (live, convert))
+                self.destroy_root()
+                self.root = tk.Tk()
+                self.root.withdraw()
+                self.window = gui.WatcherWindow(self.root)
+                self.window.open_settings("monitor").withdraw()
+                self.assertEqual((self.window.live.get(), self.window.convert_no_gpu.get()), (live, convert))
+                self.assertEqual(self.window.poll.get(), "120")
+                self.assertEqual(self.window.user.get(), "保存用户名")
         self.destroy_root()
         self.root = tk.Tk()
         self.root.withdraw()
         self.window = gui.WatcherWindow(self.root, debug=True)
         self.assertFalse(self.window.live.get())
         self.assertFalse(self.window.convert_no_gpu.get())
-        self.assertIn("--dry-run", self.window._command())
-        self.assertNotIn("--convert-no-gpu", self.window._command())
+        self.assertIn("--monitor-only", self.window._command())
 
     def test_checked_indicator_is_tick_and_output_has_event_colors(self):
         self.assertEqual(self.window.live_check["style"], "Watcher.TCheckbutton")

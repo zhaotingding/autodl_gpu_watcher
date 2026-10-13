@@ -35,7 +35,7 @@
 - 主程序在仓库根 `AutoDLWatcher.exe`，worker在 `_internal/AutoDLWorker.exe`，以 `AUTODL_APP_ROOT`共用外部config/runtime。先构建至 `.tools/build/release`再合并，保留会话、配置、偏好和旧发行目录；干净包只取未运行的暂存目录。
 - 解释器 `D:/Dev/Anaconda/envs/autodl-watcher/python.exe`；收集Conda `Library/bin`的libssl/libcrypto并设置构建PATH。包含Python/Tk/Playwright driver，使用系统Edge，须无外部Python PATH验收。代码 `tools/build_exe.py`，回归 `tests/test_package_layout.py`。
 - 辅助PowerShell用 `SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe`绝对路径。PATH故障须限制父进程或成品继承环境，仅改 `subprocess.run(env=...)`不足；窗口出现不能代替刷新/登录验收。v0.7.0修复WinError 2，2026-09-28精简PATH全流程只读实测：`v0.7.0-path-repair/gui-live-verification.json`；代码 `login.py`，回归 `tests/test_login.py`。
-- 普通GUI默认真实开机，`--debug`默认只读；打开窗口仅核验会话，监控需手动开始。停止用自有stop文件，等worker安全退出再关窗，不强杀共享浏览器；窗口1000x800沿用用户设置。
+- GUI电源偏好（2026-10-13，v0.9.0.2）：默认仅监控，普通模式恢复preferences.json的live/convert_no_gpu；旧文件缺字段按关闭，--debug启动时强制关闭。旧save只写入口/用户名/间隔，重启默认开启，且关闭选项传--dry-run仍模拟开机判断；现传--monitor-only并禁用coordinator，跳过目标选择与电源执行。证据runtime/validation/v0902/full-tests.txt、ui-report.json及restart-settings.png；370项离线回归和隔离Tk实显，未验证真实电源操作。打开窗口仅核验会话，监控需手动开始；监控中保存下次启动生效。停止用自有stop文件，等worker安全退出再关窗，不强杀共享浏览器；窗口1000x800沿用用户设置。
 - 改写Git说明前保存 `git bundle --all`及原refs，逐提交核验代码树、作者时间、映射父关系不变；本地改写不代表远程同步。v0.7.0备份 `.tools/backups/v0.7.0-before/history.bundle`。
 
 ## 训练进度与SSH只读采集

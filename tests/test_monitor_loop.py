@@ -75,6 +75,57 @@ class MonitorLoopTest(unittest.TestCase):
                 self.assertGreater(platform.return_value.collect_occupancy.call_count, 0)
                 platform.return_value.post_api_json.assert_not_called()
 
+    def test_monitor_only_never_plans_or_starts_power_even_when_gpu_ready(self):
+        config = self._conversion_config()
+        target = next(t for t in config.auto_start.targets if t.machine_name == "autodl-203-1")
+        for free in (0, 1):
+            with self.subTest(free=free), tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
+                with patch("autodl_watcher.main.load_config", return_value=config), \
+                     patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
+                     patch("autodl_watcher.main.TelemetryApiCollector") as telemetry, \
+                     patch("autodl_watcher.main.AutoStartCoordinator.attempt") as attempt, \
+                     patch("autodl_watcher.main.AutoStartCoordinator.continue_switch") as switch, \
+                     patch("autodl_watcher.main.select_target") as select:
+                    platform.return_value.collect.return_value = [PlatformHost("gpu-203", free, 2,
+                        (target.machine_name,), ((target.machine_name, free, 2),))]
+                    platform.return_value.get_instance_state.return_value = {"status": "shutdown", "start_mode": "gpu"}
+                    platform.return_value.get_account_instances.return_value = []
+                    platform.return_value.collect_occupancy.return_value = []
+                    telemetry.return_value.collect.side_effect = lambda: [
+                        GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
+                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                          "--monitor-only", "--max-cycles", "3", "--runtime-dir", directory, "--no-login"])
+                    attempt.assert_not_called()
+                    switch.assert_not_called()
+                    select.assert_not_called()
+                    platform.return_value.post_api_json.assert_not_called()
+                    self.assertEqual(telemetry.return_value.collect.call_count, 3)
+                text = output.getvalue()
+                self.assertIn("模式：仅监控", text)
+                self.assertEqual(text.count("动作：仅监控"), 3)
+                self.assertNotIn("等待GPU空位", text)
+                self.assertNotIn("等待显存达标", text)
+                self.assertNotIn("DRY-RUN", text)
+
+    def test_monitor_only_collection_failure_only_waits_for_retry(self):
+        from autodl_watcher.collectors.telemetry import TelemetryUnavailable
+        for failure in (PlatformTransientError("temporary disconnect"), TelemetryUnavailable("HTTP冷却中")):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
+                with patch("autodl_watcher.main.load_config", return_value=self._conversion_config()), \
+                     patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
+                     patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                    platform.return_value.collect_occupancy.return_value = []
+                    if isinstance(failure, PlatformTransientError):
+                        platform.return_value.collect.side_effect = failure
+                    else:
+                        platform.return_value.collect.return_value = []
+                        telemetry.return_value.collect.side_effect = failure
+                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                          "--monitor-only", "--max-cycles", "1", "--runtime-dir", directory, "--no-login"])
+                    platform.return_value.post_api_json.assert_not_called()
+                self.assertIn("动作：等待重试（仅监控，不执行电源操作）", output.getvalue())
+                self.assertNotIn("跳过开机", output.getvalue())
+
     def test_stop_during_cycle_skips_long_poll_wait(self):
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             stop = Path(directory) / "stop"

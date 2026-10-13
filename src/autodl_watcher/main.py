@@ -171,7 +171,8 @@ def _build_parser(default_host: str) -> argparse.ArgumentParser:  # 构建 CLI �
     parser.add_argument( "--host", default=default_host, help="目标物理服务器。可写 203、gpu-203；默认 203。", )
     parser.add_argument( "--entry", default="auto", help="入口选择。默认 auto；也可强制写 1、2、203-2。", )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="只判定，不真正开机。")
+    mode.add_argument("--monitor-only", action="store_true", help="仅采集监控数据，不判定或执行开关机。")
+    mode.add_argument("--dry-run", action="store_true", help="模拟开机判定，不真正开机。")
     mode.add_argument("--live", action="store_true", help="覆盖配置，真实发送开机请求。")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--user", help="占用列表中的本人用户名")
@@ -308,7 +309,7 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
         try:
             selected_targets = select_cli_targets(config.auto_start, selected_host, selected_entry)
         except ValueError:
-            if not args.dry_run or selected_entry is None:
+            if not (args.dry_run or args.monitor_only) or selected_entry is None:
                 raise
             target = AutoStartTarget(selected_host, selected_entry, "", "gpu", 100, True)
             selected_targets = (target,)  # 未配置实例的实时入口只允许只读监控。
@@ -323,13 +324,14 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
                                 or not config.auto_start.verify_before_start):
         parser.error("无卡转有卡仅支持一个有卡固定实例，并须启用开机前二次确认")
     dry_run = config.auto_start.dry_run
-    if args.dry_run:
+    if args.dry_run or args.monitor_only:
         dry_run = True
     elif args.live:
         dry_run = False
 
     selected_auto_start = replace(  # 用选中的 targets 替换配置中的全量 targets
         config.auto_start,
+        enabled=config.auto_start.enabled and not args.monitor_only,
         dry_run=dry_run,
         targets=selected_targets,
     )
@@ -409,11 +411,13 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
         convert_no_gpu=args.convert_no_gpu,
     )
 
-    auto_mode = "关闭"
+    auto_mode = "仅监控（自动开机已关闭，不执行开机或关机）"
     if selected_auto_start.enabled:
         auto_mode = "DRY-RUN" if selected_auto_start.dry_run else "真实开机"
         if args.convert_no_gpu:
             auto_mode += "；目标达标时关闭本账号全部无卡实例释放额度"
+
+    retry_action = "跳过开机，等待重试" if selected_auto_start.enabled else "等待重试（仅监控，不执行电源操作）"
 
     entry_mode = (
         "自动选择[" + ", ".join(item.machine_name for item in selected_targets) + "]"
@@ -550,7 +554,7 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
                     trigger_events = []
 
                 planned_target = None  # 按实时空位选择候选实例；状态未知时不执行开机。
-                if platform_host is not None and not self_active:
+                if selected_auto_start.enabled and platform_host is not None and not self_active:
                     planned_target = select_target(
                         selected_auto_start,
                         selected_host,
@@ -694,7 +698,7 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
                                         f"主机={selected_host} | "
                                         f"确认={absence_confirmations}/{config.occupancy.absent_confirmations_required} | "
                                         f"已清除alerted={rearmed_gpu_count} | "
-                                        "自动开机=重新武装"
+                                        f"自动开机={'重新武装' if selected_auto_start.enabled else '已关闭（仅监控）'}"
                                     )
                                     print(rearm_line, flush=True)
                                     logger.warning(
@@ -797,7 +801,13 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
                         "evaluator": evaluator.export_state(),
                     }
                 )
-                if starter.quota_blocked is not None:
+                if not selected_auto_start.enabled:
+                    action_text = "仅监控，不执行开机或关机"
+                    if last_occupancy_failed:
+                        action_text += "；占用采集失败，等待重试"
+                    elif selected_instance_error:
+                        action_text += "；实例查询失败，等待重试"
+                elif starter.quota_blocked is not None:
                     action_text = "额度不足，暂停自动开机"
                 elif account_occupancy_conflict:
                     action_text = "占用证据冲突，暂停开机并复核"
@@ -869,7 +879,7 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
             except TelemetryUnavailable as exc:
                 if args.ui:
                     emit_gpu_samples([], [], config.monitor.stale_after_seconds, str(exc))
-                print(_red_terminal_text(f"[{datetime.now():%H:%M:%S}] 监控{monitor_entry} | {exc} | 动作：跳过开机，等待重试"), flush=True)
+                print(_red_terminal_text(f"[{datetime.now():%H:%M:%S}] 监控{monitor_entry} | {exc} | 动作：{retry_action}"), flush=True)
                 logger.warning("telemetry unavailable: %s", exc)
             except PlatformTransientError as exc:
                 if args.ui:
@@ -877,7 +887,7 @@ def run_monitor(config, args, config_path, parser):  # 独立监控入口，保�
                 if not platform_session_verified:  # 后续入口或数据故障不否定本轮已成功的会话核验。
                     emit_session("unknown", f"平台请求异常，无法确认会话：{exc}")
                 now = datetime.now()  # 页面/API 慢、超时、429、5xx 都属于数据采集瞬时故障。 不弹登录窗口，不修改本人占用状态，也绝不发送开机请求。
-                print(_red_terminal_text(f"[{now:%H:%M:%S}] 监控{monitor_entry} | 本轮采集暂时失败 | 动作：跳过开机，等待重试：{exc}"), flush=True)
+                print(_red_terminal_text(f"[{now:%H:%M:%S}] 监控{monitor_entry} | 本轮采集暂时失败 | 动作：{retry_action}：{exc}"), flush=True)
                 logger.warning("platform transient failure: %s", exc)
             except Exception as exc:
                 if args.ui:

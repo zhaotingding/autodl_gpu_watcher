@@ -174,7 +174,7 @@ class GuiOptionsTest(unittest.TestCase):
 
     def test_unknown_server_allows_monitoring_but_blocks_live_start(self):
         command = monitor_command(self.config, "autodl-999-1", "测试用户", 1, False, Path("stop"))
-        self.assertIn("--dry-run", command)
+        self.assertIn("--monitor-only", command)
         self.assertIn("gpu-999", command)
         with self.assertRaises(ValueError):
             monitor_command(self.config, "autodl-999-1", "测试用户", 1, True, Path("stop"))

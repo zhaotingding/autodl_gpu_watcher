@@ -78,7 +78,7 @@ def monitor_command(config, entry, user, poll, live, stop_file, convert_no_gpu=F
     command = worker_command("monitor", "--config", str(ROOT / "config.yaml"),
             "--host", normalize_host(entry), "--entry", entry, "--user", user.strip(),
             "--poll-seconds", str(poll), "--ui",
-            "--live" if live else "--dry-run", "--no-login", "--stop-file", str(stop_file))  # 参数列表直接传给进程，不经 shell 拼接。
+            "--live" if live else "--monitor-only", "--no-login", "--stop-file", str(stop_file))  # 参数列表直接传给进程，不经 shell 拼接。
     return command + (["--convert-no-gpu"] if convert_no_gpu else [])
 
 
@@ -95,9 +95,9 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.closing = False  # 请求关窗后先等后台任务安全结束，再销毁 Tk。
         self.user = tk.StringVar(value=self.config.occupancy.self_user)  # StringVar 将输入框内容与 Python 变量绑定。
         self.poll = tk.StringVar(value=str(self.config.monitor.poll_seconds))
-        self.debug = debug  # 普通模式按用户要求真实开机；显式调试模式只读，打开窗口仍不会自动监控。
-        self.live = tk.BooleanVar(value=not debug)
-        self.convert_no_gpu = tk.BooleanVar(value=not debug)
+        self.debug = debug  # 调试模式强制仅监控；普通模式恢复已保存的电源选项。
+        self.live = tk.BooleanVar(value=False)
+        self.convert_no_gpu = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="未运行 · 选择入口后开始监控")
         self.session_status = "unknown"
         self.session_message = "登录会话尚未核验"
@@ -123,6 +123,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                 self.user.set(saved.get("user", self.user.get()))
                 self.poll.set("60" if "usage" in saved else saved.get("poll", self.poll.get()))  # 旧双间隔偏好一次迁移为60秒。
                 self.saved_entry = saved.get("entry", "")
+                self.live.set(not debug and saved.get("live", False) is True)
+                self.convert_no_gpu.set(self.live.get() and saved.get("convert_no_gpu", False) is True)
             except (ValueError, OSError, AttributeError):
                 self.status.set("本地偏好读取失败，已使用默认配置")
         self.icons = IconManager(root, self.local)
@@ -429,13 +431,15 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
 
     def save(self):  # 保存输入前复用启动校验，避免把明显无效的设置留到下次。
         try:
-            self._command()
+            command = self._command()
             preferences = {"entry": self.selected_entry(), "user": self.user.get().strip(),
-                           "poll": self.poll.get()}
+                           "poll": self.poll.get(), "live": self.live.get(),
+                           "convert_no_gpu": self.live.get() and self.convert_no_gpu.get()}
             temp = self.local / "preferences.tmp"
             temp.write_text(json.dumps(preferences, ensure_ascii=False, indent=2), encoding="utf-8")
             temp.replace(self.local / "preferences.json")  # 临时文件写完整后替换，降低中断产生半份 JSON 的风险。
-            self.status.set("设置已保存 · 调试模式默认只读" if self.debug else "设置已保存 · 普通模式默认真实开机")
+            mode = "自动开机已开启" if "--live" in command else "仅监控，不执行开机或关机"
+            self.status.set(f"设置已保存 · {mode}" + (" · 当前监控保持原设置，下次开始生效" if self.job == "monitor" else ""))
             return True
         except (ValueError, argparse.ArgumentTypeError, OSError) as exc:
             messagebox.showerror("设置无效", str(exc), parent=self.root)
@@ -476,7 +480,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self._busy(True)
         if job in {"discover", "monitor", "login"}:
             self._session("checking", "等待人工登录及同步后核验" if job == "login" else "正在核验真实主机接口")
-        self.status.set({"monitor": "监控进程已启动 · 等待首次采集", "discover": "正在读取实际服务器列表…",
+        mode = "自动开机已开启" if "--live" in command else "仅监控，不执行开机或关机"
+        self.status.set({"monitor": f"监控进程已启动 · {mode} · 等待首次采集", "discover": "正在读取实际服务器列表…",
                          "login": "请在 Edge 登录并关闭窗口，然后点击“已登录并关闭浏览器”"}[job])
         threading.Thread(target=self._read, args=(self.process,), daemon=True).start()  # 管道 readline 可以阻塞，因此放入后台线程。
 

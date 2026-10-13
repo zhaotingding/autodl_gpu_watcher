@@ -137,7 +137,7 @@ class TrainingWindowTest(unittest.TestCase):
         self.assertEqual(window.table.set("autodl-203-2", "training"), "未配置")
         window.live.set(True); window.convert_no_gpu.set(True)
         window.table.selection_set("autodl-202-2")
-        self.assertIn("--dry-run", window._command())
+        self.assertIn("--monitor-only", window._command())
         self.assertNotIn("--convert-no-gpu", window._command())
         window.table.selection_set("autodl-203-1")
         self.assertIn("--live", window._command())
