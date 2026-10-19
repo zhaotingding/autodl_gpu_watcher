@@ -37,7 +37,8 @@ def main(stage_only=False, icon=None):  # 只收集应用代码和依赖，绝�
     binaries = [(str(library_bin / name), ".") for name in
                 ("libssl-3-x64.dll", "libcrypto-3-x64.dll") if (library_bin / name).is_file()]
     datas = [(str(ROOT / "src/autodl_watcher/remote_probe.py"), "autodl_watcher"),
-             (str(ROOT / "src/autodl_watcher/default.ico"), "autodl_watcher")]  # SSH仅发送这份只读标准库探针。
+             (str(ROOT / "src/autodl_watcher/default.ico"), "autodl_watcher"),
+             (str(ROOT / "src/autodl_watcher/defaults.yaml"), "autodl_watcher")]  # SSH仅发送这份只读标准库探针。
     env = os.environ.copy()
     if library_bin.is_dir():
         env["PATH"] = str(library_bin) + os.pathsep + env.get("PATH", "")  # Conda DLL 必须与打包解释器一致。
@@ -61,6 +62,8 @@ COLLECT(gui, a.binaries, a.datas, [('AutoDLWorker.exe', worker.name, 'BINARY')],
                     str(spec)], cwd=ROOT, env=env, check=True)
     release = ROOT  # 主程序直接放项目根目录，沿用已有配置和运行资料。
     staged = folder / "release" / "AutoDLWatcher"
+    from importlib.resources import files
+    (staged / "config.yaml").write_bytes(files("autodl_watcher").joinpath("defaults.yaml").read_bytes())
     if stage_only:
         print(f"暂存构建：{staged}")
         return staged  # 验证通过后才替换正在使用的主程序。

@@ -1,12 +1,12 @@
 """关闭GUI后更新EXE图标，保留PyInstaller附加的程序归档。"""
 import ctypes
 from ctypes import wintypes
-import json
 import os
 from pathlib import Path
 import shutil
 import struct
 import sys
+from .yaml_settings import read_settings, write_settings
 
 
 def pe_end(data):
@@ -77,7 +77,7 @@ def main():
     kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     root = Path(os.environ["AUTODL_APP_ROOT"])
-    status = root / ".ui" / "icon-executable-status.json"
+    status = root / ".ui" / "icon-executable-status.yaml"
     try:
         handle = kernel.OpenProcess(0x100000, False, pid)
         if handle:
@@ -85,10 +85,10 @@ def main():
             kernel.CloseHandle(handle)
             if result != 0:
                 raise TimeoutError("GUI尚未关闭，EXE图标未更新")
-        name = json.loads((root / ".ui/icon.json").read_text(encoding="utf-8"))["file"]
+        name = read_settings(root / ".ui/icon.yaml")["file"]
         icon = root / ".ui" / name if name else Path(__file__).with_name("default.ico")
         replace_icon(root / "AutoDLWatcher.exe", icon)
         message = "EXE图标已同步；请刷新目录后查看。"
     except (OSError, ValueError) as exc:
         message = "EXE图标同步失败：" + str(exc)
-    status.write_text(json.dumps({"message": message}, ensure_ascii=False), encoding="utf-8")
+    write_settings(status, {"message": message})

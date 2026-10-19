@@ -15,7 +15,7 @@ from autodl_watcher.models import GpuSample, OccupancyRecord, PlatformHost
 
 class Version070Test(unittest.TestCase):
     def collector(self):
-        collector = PlatformBrowserCollector(load_config(ROOT / "config.yaml").platform)
+        collector = PlatformBrowserCollector(load_config(Path(__file__).parent / "fixtures/monitor.yaml").platform)
         collector.start = Mock()
         collector._context = Mock()
         collector._authorization = "test-only"
@@ -51,12 +51,12 @@ class Version070Test(unittest.TestCase):
         response.json.return_value = {"code": "fixture_expired", "msg": "登陆超时，请重新登录; 登录失败，请重试"}
         collector = self.collector()
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector", return_value=collector), \
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector", return_value=collector), \
                  patch.object(collector, "collect", side_effect=lambda: collector._parse_machine_list_response(response)) as collect, \
                  patch.object(collector, "close"), patch.object(collector, "post_api_json") as power, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 with self.assertRaises(SystemExit) as stopped:
-                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                           "--dry-run", "--no-login", "--max-cycles", "3", "--poll-seconds", "0.01", "--runtime-dir", directory])
                 self.assertEqual(stopped.exception.code, 3)
                 collect.assert_called_once()
@@ -68,11 +68,11 @@ class Version070Test(unittest.TestCase):
     def test_local_startup_failure_stops_without_retry_or_power(self):
         from autodl_watcher.login import LocalStartupError
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.side_effect = LocalStartupError("未找到 Windows PowerShell：missing/powershell.exe")
                 with self.assertRaises(SystemExit) as stopped:
-                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                           "--dry-run", "--no-login", "--max-cycles", "3", "--runtime-dir", directory])
                 self.assertEqual(stopped.exception.code, 5)
                 platform.return_value.collect.assert_called_once()
@@ -86,13 +86,13 @@ class Version070Test(unittest.TestCase):
     def test_expiry_during_occupancy_stops_immediately(self):
         host = PlatformHost("gpu-203", 0, 2, ("autodl-203-1",), (("autodl-203-1", 0, 2),))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = PlatformAuthenticationError("登录超时，请重新登录")
                 telemetry.return_value.collect.return_value = []
                 with self.assertRaises(SystemExit) as stopped:
-                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                           "--dry-run", "--no-login", "--max-cycles", "3", "--runtime-dir", directory])
                 self.assertEqual(stopped.exception.code, 3)
                 platform.return_value.collect_occupancy.assert_called_once()
@@ -103,12 +103,12 @@ class Version070Test(unittest.TestCase):
     def test_transient_failure_prints_once_and_recovers_next_cycle(self):
         host = PlatformHost("gpu-203", 0, 2, ("autodl-203-1",), (("autodl-203-1", 0, 2),))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.side_effect = [PlatformTransientError("HTTP 503"), [host]]
                 platform.return_value.collect_occupancy.return_value = []
                 telemetry.return_value.collect.return_value = []
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--dry-run", "--no-login", "--max-cycles", "2", "--poll-seconds", "0.01", "--runtime-dir", directory])
                 platform.return_value.post_api_json.assert_not_called()
             headlines = [line for line in output.getvalue().splitlines() if "] 监控203-1 |" in line]
@@ -118,7 +118,7 @@ class Version070Test(unittest.TestCase):
             self.assertNotIn("登录已失效", output.getvalue())
 
     def test_two_line_output_refreshes_occupancy_every_cycle_without_history(self):
-        config = load_config(ROOT / "config.yaml")
+        config = load_config(Path(__file__).parent / "fixtures/monitor.yaml")
         target = next(item for item in config.auto_start.targets if item.machine_name == "autodl-203-1")
         host = PlatformHost("gpu-203", 0, 2, ("autodl-203-1", "autodl-203-2"),
                             (("autodl-203-1", 0, 2), ("autodl-203-2", 0, 2)))
@@ -126,8 +126,8 @@ class Version070Test(unittest.TestCase):
             return [OccupancyRecord(datetime.now(), "gpu-203", name, 1, "gpu-1", "V100", True,
                                     f"{target.instance_uuid} (自己)\naaaaaaaaaa-bbbbbbbb (其他用户)", "", "")]
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = occupancy
                 platform.return_value.get_account_instances.return_value = [
@@ -135,7 +135,7 @@ class Version070Test(unittest.TestCase):
                 platform.return_value.get_instance_state.return_value = {
                     "status": "running", "start_mode": "gpu", "host_account_gpu_clear": False}
                 telemetry.return_value.collect.side_effect = lambda: [GpuSample("gpu-203", 1, "V100", 0, 1000, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--dry-run", "--no-login", "--max-cycles", "2", "--poll-seconds", "0.01",
                       "--runtime-dir", directory])
                 platform.return_value.post_api_json.assert_not_called()

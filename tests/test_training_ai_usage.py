@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import queue
 import tempfile
@@ -8,7 +9,7 @@ from unittest.mock import patch
 from autodl_watcher.training_ai import analyze, settings, AnalysisError, DEFAULT_PROMPT, save_settings, load_settings
 from autodl_watcher.training_ai_usage import LUNA_PRICES, UsageStore, estimate, tokens, call_text
 from autodl_watcher.training_ai_ui import AIAssistant, profile_text
-from autodl_watcher.training_ui import TrainingService
+from autodl_watcher.training_service import TrainingService
 from test_training_ai import SOURCE, RESULT, CONFIG, sse
 
 PRICING = {**LUNA_PRICES, 'model':CONFIG['model'], 'base_url':CONFIG['base_url']}
@@ -67,7 +68,7 @@ class UsageTest(unittest.TestCase):
 
     def test_invalid_rule_is_written_once_without_log_or_key(self):
         with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'ai.json';path.write_text(json.dumps(CONFIG_PRICE))
+            path=Path(folder)/'ai.yaml';path.write_text(json.dumps(CONFIG_PRICE))
             ai=AIAssistant(None,path,TrainingService(queue.Queue()))
             with patch('autodl_watcher.training_ai.ai_credentials.read',return_value='test-only-key'), patch('autodl_watcher.training_ai.requests.Session') as factory:
                 response=factory.return_value.__enter__.return_value.post.return_value.__enter__.return_value
@@ -99,11 +100,31 @@ class UsageTest(unittest.TestCase):
         self.assertIn('不可覆盖的输出契约',content)
         self.assertIn('fields',content)
         with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'ai.json'
+            path=Path(folder)/'ai.yaml'
             save_settings(path,{**CONFIG_PRICE,'prompt':prompt})
             self.assertEqual(load_settings(path)['prompt'],prompt)
         self.assertEqual(settings(CONFIG)['prompt'],DEFAULT_PROMPT)
         with self.assertRaises(AnalysisError):settings({**CONFIG,'prompt':''})
+
+    def test_summary_keeps_unknown_totals_and_limits_only_displayed_history(self):
+        today = datetime.now(timezone(timedelta(hours=8))).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        with tempfile.TemporaryDirectory() as folder:
+            usage = UsageStore(Path(folder)/'usage.sqlite3')
+            for index in range(61):
+                usage.record({'time': today + 3600 + index if index < 30 else today - 86400 + index,
+                              'model': 'history-' + str(index), 'requested_tier': 'flex', 'status': 'mock',
+                              'tokens': {'input': None if index % 3 == 0 else 100, 'output': 2, 'cached': None, 'write': 0},
+                              'usd': None if index == 0 else .1, 'cny': None if index == 0 else .5})
+            summary = usage.summary()
+            cumulative = summary.split('累计：', 1)[1].split('最近调用', 1)[0]
+            self.assertIn('61次请求', cumulative)
+            self.assertIn('输入 4,000（21笔未知）', cumulative)
+            self.assertIn('输出 122', cumulative)
+            self.assertIn('缓存命中 0（61笔未知）', cumulative)
+            self.assertIn('¥30.000000；另有1笔费用未知', cumulative)
+            self.assertIn('今日（UTC+8）：30次请求', summary)
+            self.assertEqual(len(usage.records()), 61)  # 只限制展示数量，原账本不删历史。
+            self.assertEqual(summary.count('实际模型'), 50)
 
     def test_profile_text_does_not_claim_application_without_current_card(self):
         text=profile_text({'profile':RESULT},'主卡片：默认监控 · 当前片段未匹配规则')

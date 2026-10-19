@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 
 from autodl_watcher.remote_probe import training_roots
-from autodl_watcher.training import TrainingServer, TrainingTracker, load_servers, parse_progress
+from autodl_watcher.training_config import TrainingServer, load_servers
+from autodl_watcher.training_tracker import TrainingTracker
+from autodl_watcher.training_events import parse_progress
 from autodl_watcher.training_ui import metrics_text, task_memory
 from test_training import snapshot
 
@@ -33,7 +35,7 @@ class TrainingCompatibilityTest(unittest.TestCase):
 
     def test_legacy_default_migrates_in_memory_but_custom_filter_and_file_stay_unchanged(self):
         with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'servers.json'
+            path=Path(folder)/'servers.yaml'
             old=asdict(TrainingServer('old','old','host',scripts='train.py,trainer.py,train_net.py'))
             custom=asdict(TrainingServer('custom','custom','host',scripts='only_this.py'))
             path.write_text(json.dumps([old,custom]),encoding='utf-8')

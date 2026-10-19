@@ -151,11 +151,11 @@ class GuiOptionsTest(unittest.TestCase):
             self.assertIn("清理失败", output.getvalue())
 
     def setUp(self):
-        self.config = load_config(ROOT / "config.yaml")
+        self.config = load_config(Path(__file__).parent / "fixtures/monitor.yaml")
 
     def test_project_local_runtime_paths(self):
-        self.assertEqual(self.config.platform.user_data_dir, ROOT / "runtime" / "browser_profile")
-        self.assertEqual(self.config.runtime.state_file, ROOT / "runtime" / "state.json")
+        self.assertEqual(self.config.platform.user_data_dir, Path(__file__).parent / "fixtures/runtime" / "browser_profile")
+        self.assertEqual(self.config.runtime.state_file, Path(__file__).parent / "fixtures/runtime" / "state.json")
         self.assertFalse(hasattr(self.config.occupancy, "database_path"))
 
     def test_invalid_intervals_are_rejected(self):
@@ -188,7 +188,7 @@ class GuiOptionsTest(unittest.TestCase):
         self.assertEqual(command[command.index("--entry") + 1], "autodl-203-1")
         for args in (["--convert-no-gpu", "--live"], ["--convert-no-gpu", "--entry", "1", "--dry-run"]):
             with self.subTest(args=args), self.assertRaises(SystemExit):
-                main(["--config", str(ROOT / "config.yaml"), *args])
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), *args])
 
     def test_empty_username_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -204,8 +204,8 @@ class GuiOptionsTest(unittest.TestCase):
             root = Path(directory)
             stop = root / "stop"
             stop.touch()
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform:
-                main(["--config", str(ROOT / "config.yaml"), "--dry-run", "--stop-file", str(stop),
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform:
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--dry-run", "--stop-file", str(stop),
                       "--runtime-dir", str(root), "--no-login"])
                 platform.return_value.collect.assert_not_called()
                 platform.return_value.close.assert_called_once()

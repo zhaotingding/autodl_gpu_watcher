@@ -60,8 +60,6 @@ class LoginProfileCleanupV051Test(unittest.TestCase):
             self.assertTrue((profile / "Cookies").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class LoginV051Test(unittest.TestCase):
     def test_login_profile_is_separate_from_browser_profile(self) -> None:
@@ -105,6 +103,7 @@ class LoginWorkflowV051Test(unittest.TestCase):
 
             with patch("autodl_watcher.login.find_edge_executable", return_value=edge_path), \
                  patch("autodl_watcher.login.terminate_profile_edge_processes") as terminate, \
+                 patch("autodl_watcher.login.wait_for_profile_edge_exit", return_value=True), \
                  patch("autodl_watcher.login.launch_native_edge") as launch, \
                  patch("autodl_watcher.login.automation_flags_present", return_value=False), \
                  patch("autodl_watcher.login.sync_login_profile_to_browser") as sync, \
@@ -115,7 +114,8 @@ class LoginWorkflowV051Test(unittest.TestCase):
             clean_profile = browser_profile.parent / "native_login_profile"
             launch.assert_called_once_with(edge_path, clean_profile, config.platform.page_url)
             sync.assert_called_once_with(clean_profile, browser_profile)
-            self.assertGreaterEqual(terminate.call_count, 3)
+            self.assertEqual([call.args[0] for call in terminate.call_args_list],
+                             [browser_profile, clean_profile])  # 强制清理只发生在登录前，确认后不再杀源浏览器。
 
     def test_sync_login_profile_replaces_browser_profile_without_lock_files(self) -> None:
         from autodl_watcher.login import sync_login_profile_to_browser
@@ -131,11 +131,92 @@ class LoginWorkflowV051Test(unittest.TestCase):
             (browser_profile / "Cookies").write_text("stale", encoding="utf-8")
 
             with patch("autodl_watcher.login.terminate_profile_edge_processes"), \
-                 patch("autodl_watcher.login.time.sleep"):
+                 patch("autodl_watcher.login.close_profile_edge_windows"), \
+                 patch("autodl_watcher.login.wait_for_profile_edge_exit", return_value=True):
                 sync_login_profile_to_browser(login_profile, browser_profile)
 
             self.assertEqual((browser_profile / "Cookies").read_text(encoding="utf-8"), "fresh")
             self.assertFalse((browser_profile / "SingletonLock").exists())
+
+
+class LoginProfileHandoffTest(unittest.TestCase):
+    def test_running_login_profile_is_never_killed_or_copied(self):
+        from autodl_watcher.login import sync_login_profile_to_browser
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, target = root / "native", root / "monitor"
+            source.mkdir()
+            target.mkdir()
+            (source / "Cookies").write_text("new", encoding="utf-8")
+            (source / "SingletonLock").write_text("active", encoding="utf-8")
+            (target / "Cookies").write_text("previous", encoding="utf-8")
+            with patch("autodl_watcher.login.wait_for_profile_edge_exit", return_value=False), \
+                 patch("autodl_watcher.login.close_profile_edge_windows"), \
+                 patch("autodl_watcher.login.terminate_profile_edge_processes") as terminate, \
+                 patch("autodl_watcher.login.shutil.copytree") as copy:
+                with self.assertRaisesRegex(RuntimeError, "尚未退出"):
+                    sync_login_profile_to_browser(source, target)
+            terminate.assert_not_called()  # 不强杀刚完成认证的浏览器，也不触碰旧监控资料。
+            copy.assert_not_called()
+            self.assertEqual((target / "Cookies").read_text(encoding="utf-8"), "previous")
+            self.assertTrue((source / "SingletonLock").exists())
+
+    def test_login_window_disables_background_mode_without_automation_flags(self):
+        from autodl_watcher.login import launch_native_edge, _AUTOMATION_FLAGS
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("autodl_watcher.login.subprocess.Popen") as launch:
+            launch_native_edge(Path("msedge.exe"), Path(directory), "https://private.autodl.test/landing")
+        command = launch.call_args.args[0]
+        self.assertIn("--disable-background-mode", command)
+        self.assertFalse(any(flag in argument for flag in _AUTOMATION_FLAGS for argument in command))
+
+    def test_process_query_failure_cannot_claim_profile_has_exited(self):
+        from autodl_watcher.login import LocalStartupError, edge_process_command_lines
+        with patch("autodl_watcher.login.os.name", "nt"), \
+             patch("autodl_watcher.login._powershell_executable", return_value="powershell.exe"), \
+             patch("autodl_watcher.login.subprocess.run") as run:
+            run.return_value.returncode = 1
+            with self.assertRaises(LocalStartupError):
+                edge_process_command_lines(Path("unused-profile"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows专用窗口正常关闭")
+    def test_normal_close_uses_owned_profile_without_force_or_public_browser(self):
+        from autodl_watcher.login import close_profile_edge_windows
+        with patch("autodl_watcher.login.subprocess.run") as run:
+            run.return_value.returncode = 0
+            close_profile_edge_windows(Path("watcher-login-only"))
+        command = run.call_args.args[0]
+        self.assertEqual(Path(command[0]).name, "powershell.exe")
+        self.assertIn("CloseMainWindow()", command[-1])
+        self.assertIn("watcher-login-only", command[-1])
+        self.assertNotIn("Stop-Process", command[-1])
+        self.assertEqual(run.call_args.kwargs["creationflags"], __import__('subprocess').CREATE_NO_WINDOW)
+
+    def test_exclusive_cleanup_does_not_remove_locks_until_exit_is_confirmed(self):
+        from autodl_watcher.login import prepare_profile_for_exclusive_use
+        with patch("autodl_watcher.login.terminate_profile_edge_processes"), \
+             patch("autodl_watcher.login.wait_for_profile_edge_exit", return_value=False), \
+             patch("autodl_watcher.login.remove_stale_profile_locks") as cleanup:
+            with self.assertRaisesRegex(RuntimeError, "尚未退出"):
+                prepare_profile_for_exclusive_use(Path("unused-profile"))
+        cleanup.assert_not_called()
+
+    def test_synced_login_storage_can_be_read_after_normal_exit(self):
+        from autodl_watcher.login import sync_login_profile_to_browser
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, target = root / "native", root / "monitor"
+            storage = source / "Default/Local Storage/leveldb"
+            storage.mkdir(parents=True)
+            (storage / "000001.log").write_bytes(b"synthetic fresh authentication")
+            with patch("autodl_watcher.login.wait_for_profile_edge_exit", return_value=True), \
+                 patch("autodl_watcher.login.close_profile_edge_windows") as close, \
+                 patch("autodl_watcher.login.terminate_profile_edge_processes") as terminate:
+                sync_login_profile_to_browser(source, target)
+            self.assertEqual((target / "Default/Local Storage/leveldb/000001.log").read_bytes(),
+                             b"synthetic fresh authentication")
+            close.assert_called_once_with(source)  # 确认后主动请求正常关窗，结束后再同步。
+            self.assertEqual([call.args[0] for call in terminate.call_args_list], [target])
 
 
 class LoginSessionVerificationTest(unittest.TestCase):
@@ -250,3 +331,7 @@ class PowerShellPathTest(unittest.TestCase):
         self.assertNotIn('"status": "invalid"', output.getvalue())
         self.assertNotIn("网络", output.getvalue())
         factory.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

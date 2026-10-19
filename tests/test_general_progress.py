@@ -1,5 +1,7 @@
 import unittest
-from autodl_watcher.training import parse_progress, TrainingServer, TrainingTracker
+from autodl_watcher.training_events import parse_progress
+from autodl_watcher.training_config import TrainingServer
+from autodl_watcher.training_tracker import TrainingTracker
 from autodl_watcher.training_ui import metrics_text
 from test_training import snapshot
 
@@ -15,7 +17,7 @@ class GeneralProgressTest(unittest.TestCase):
 
     def test_nonstandard_script_with_generic_log_is_discovered(self):
         from autodl_watcher.remote_probe import discover_evidence, training_roots
-        from autodl_watcher.training import DEFAULT_SCRIPTS
+        from autodl_watcher.training_config import DEFAULT_SCRIPTS
         from unittest.mock import patch
         process=dict(pid=1,ppid=0,args=['python','solver.py'],cwd='/project')
         with patch('autodl_watcher.remote_probe.task_files',return_value=['/project/result.txt']), patch('autodl_watcher.remote_probe.read_log',return_value={'head':"{'epoch': 1.5, 'loss': 0.2}",'tail':''}):
@@ -38,6 +40,11 @@ class GeneralProgressTest(unittest.TestCase):
         self.assertEqual(p['train']['metrics']['Dice'],0.81)
         self.assertEqual(p['tests']['validation']['metrics']['mAP@50'],0.91)
         self.assertEqual(p['tests']['validation']['step'],42)
+
+    def test_text_progress_with_braced_annotation_still_parses(self):
+        p = parse_progress('train epoch=3 step=40 loss=0.2 {warmup}')  # 注释花括号不是字典，但前面的键值仍是进度。
+        self.assertEqual((p['phase'], p['epoch'], p['step']), ('train', 3, 40))
+        self.assertEqual(p['train']['metrics'], {'loss': 0.2})
 
     def test_unattributed_metrics_do_not_claim_training(self):
         p=parse_progress('{"epoch":3,"step":42,"metrics":{"perplexity":12.4}}')
@@ -62,5 +69,22 @@ class GeneralProgressTest(unittest.TestCase):
         p=parse_progress('Epoch 2: 45%|####      | 45/100 [00:04<00:05, 9it/s, custom_score=0.73]')
         self.assertIsNone(p['step'])
         self.assertEqual(p['train']['metrics']['custom_score'],0.73)
+
+
+
+class LongLogLineTest(unittest.TestCase):
+    def test_non_error_identifier_does_not_trigger_quadratic_error_search(self):
+        # 探针允许 64 KiB 单行片段；旧未锚定错误正则会在同一单词内反复回溯。
+        import subprocess
+        import sys
+        from pathlib import Path
+        source = Path(__file__).resolve().parents[1] / "src"
+        code = ("import sys;sys.path.insert(0," + repr(str(source)) + ");"
+                "from autodl_watcher.training_events import parse_progress;"
+                "r=parse_progress('x'*65536+'\\nRuntimeError: confirmed');"
+                "assert 'confirmed' in r['error']")
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=4)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__=='__main__':unittest.main()

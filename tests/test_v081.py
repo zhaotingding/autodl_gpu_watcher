@@ -11,14 +11,16 @@ from autodl_watcher import remote_probe
 from autodl_watcher.config import load_config
 from autodl_watcher.gui import ROOT, DATA_PREFIX, discovery_rows, discover
 from autodl_watcher.models import PlatformHost
-from autodl_watcher.training import TrainingServer, TrainingTracker, parse_progress
+from autodl_watcher.training_config import TrainingServer
+from autodl_watcher.training_tracker import TrainingTracker
+from autodl_watcher.training_events import parse_progress
 from autodl_watcher.training_ui import gpu_table, task_memory
 from test_training import snapshot, LOG
 
 
 class Version081Test(unittest.TestCase):
     def test_power_eligibility_requires_current_instance_not_saved_uuid(self):
-        config = load_config(ROOT / "config.yaml")
+        config = load_config(Path(__file__).parent / "fixtures/monitor.yaml")
         hosts = [PlatformHost("gpu-203", 0, 2, (), tuple((item.machine_name, 0, 2) for item in config.auto_start.targets))]
         target = config.auto_start.targets[0]
         instances = [dict(machine_name=target.machine_name, instance_uuid=target.instance_uuid)]

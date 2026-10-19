@@ -1,3 +1,4 @@
+from training_helpers import wait_training
 import json
 import queue
 import tempfile
@@ -7,8 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from autodl_watcher.remote_probe import training_roots
-from autodl_watcher.training import TrainingServer, TrainingTracker, load_servers, log_text, parse_progress, save_servers
-from autodl_watcher.training_ui import TrainingService
+from autodl_watcher.training_config import TrainingServer, load_servers, save_servers
+from autodl_watcher.training_tracker import TrainingTracker
+from autodl_watcher.training_events import log_text, parse_progress
+from autodl_watcher.training_service import TrainingService
 
 
 LOG = """nEpochs: 30
@@ -140,7 +143,7 @@ class TrainingTest(unittest.TestCase):
 
     def test_local_profiles_are_atomic_and_reject_bad_input(self):
         with tempfile.TemporaryDirectory() as temp:
-            path=Path(temp)/'servers.json'
+            path=Path(temp)/'servers.yaml'
             save_servers(path,[self.server])
             self.assertEqual(load_servers(path),[self.server])
             for alias in ('-oProxyCommand=x','server\ncommand','a b'):
@@ -150,9 +153,9 @@ class TrainingTest(unittest.TestCase):
                 TrainingServer('s','s','host',stalled_minutes=float('nan')).validate()
 
     def test_ssh_uses_no_forwarding_no_prompts_and_only_stdin_probe(self):
-        from autodl_watcher.training import TrainingConnection
+        from autodl_watcher.training_connection import TrainingConnection
         connection=TrainingConnection(self.server)
-        with patch('autodl_watcher.training.ssh_executable',return_value='ssh'):
+        with patch('autodl_watcher.training_connection.ssh_executable',return_value='ssh'):
             args=connection._command()
         for option in ('-v','ClearAllForwardings=yes','StrictHostKeyChecking=yes','BatchMode=yes',
                        'PreferredAuthentications=publickey','PasswordAuthentication=no','ConnectionAttempts=1',
@@ -162,7 +165,7 @@ class TrainingTest(unittest.TestCase):
 
     def test_connection_failure_preserves_last_snapshot_as_unknown(self):
         service=TrainingService(queue.Queue());service.register(self.server);service.start('s',60)
-        service.receive(('s',0,snapshot(),''))
+        service.receive(('s',0,snapshot(),''));wait_training(service)
         service.receive(('s',0,None,'SSH timeout'))
         state=service.states['s']
         self.assertIn('SSH timeout；60秒后重试',state['snapshot']['error'])
@@ -171,7 +174,7 @@ class TrainingTest(unittest.TestCase):
     def test_late_response_after_stop_cannot_reactivate_monitor(self):
         service=TrainingService(queue.Queue());service.register(self.server);service.start('s',60)
         service.states['s']['busy']=True
-        service.stop('s');service.receive(('s',0,snapshot(),''))
+        service.stop('s');service.receive(('s',0,snapshot(),''));wait_training(service);wait_training(service)
         self.assertFalse(service.states['s']['active'])
         self.assertFalse(service.busy())
         self.assertIsNone(service.states['s']['snapshot'])
@@ -180,7 +183,7 @@ class TrainingTest(unittest.TestCase):
         service=TrainingService(queue.Queue());service.register(self.server)
         other=TrainingServer('other','4090','ssh4090');service.register(other)
         service.start('s',60);service.start('other',60)
-        with patch('autodl_watcher.training_ui.threading.Thread') as thread:
+        with patch('autodl_watcher.training_service.threading.Thread') as thread:
             service.tick();service.tick()
             self.assertEqual(thread.call_count,2)
         service.stop('s')

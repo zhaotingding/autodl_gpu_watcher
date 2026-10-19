@@ -1,0 +1,75 @@
+# 仅供离线模拟；实例标识与用户名均为合成数据。
+monitor:
+  poll_seconds: 60
+  confirmation_seconds: 0
+  min_idle_samples: 1
+  max_sample_gap_seconds: 120
+  stale_after_seconds: 90
+  reset_busy_samples: 1
+idle_thresholds:
+  gpu_util_check_enabled: false
+  gpu_util_max_pct: 100
+  memory_free_min_mb: 8192
+  memory_free_min_ratio: 0.25
+platform:
+  page_url: https://private.autodl.com/console/machine
+  api_path_contains: /api/v2/machine/list
+  api_base_url: https://private.autodl.com
+  browser_channel: msedge
+  user_data_dir: runtime/browser_profile
+  headless: true
+  response_timeout_seconds: 20
+  max_attempts: 2
+  retry_delay_seconds: 2
+  autodl_direct: true
+  proxy_bypass_list: private.autodl.com;*.autodl.com;<local>
+  aggregation: max
+telemetry:
+  endpoint: https://telemetry.example.invalid/api/latest
+  timeout_seconds: 20
+  max_attempts: 2
+  retry_delay_seconds: 2
+  only_online: true
+auto_start:
+  enabled: true
+  default_host: gpu-203
+  dry_run: false
+  verify_before_start: true
+  recheck_delay_seconds: 1
+  post_start_check_seconds: 5
+  max_starts_per_event: 1
+  targets:
+  - host: gpu-203
+    machine_name: autodl-203-1
+    instance_uuid: 0000000203-00000001
+    start_mode: gpu
+    priority: 10
+    enabled: true
+  - host: gpu-203
+    machine_name: autodl-203-2
+    instance_uuid: 0000000203-00000002
+    start_mode: gpu
+    priority: 20
+    enabled: true
+  - host: gpu-202
+    machine_name: autodl-202-2
+    instance_uuid: 0000000202-00000002
+    start_mode: gpu
+    priority: 10
+    enabled: true
+  - host: gpu-201
+    machine_name: autodl-201-1
+    instance_uuid: 0000000201-00000001
+    start_mode: gpu
+    priority: 10
+    enabled: true
+occupancy:
+  self_user: test-user
+  absent_confirmations_required: 2
+notification:
+  console_enabled: true
+  email_enabled: false
+  subject_prefix: '[AutoDL 开机达标]'
+runtime:
+  state_file: runtime/state.json
+  log_file: runtime/logs/watcher.log

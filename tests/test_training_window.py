@@ -1,3 +1,4 @@
+from training_helpers import wait_training
 import json
 import queue
 import shutil
@@ -9,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autodl_watcher import gui
-from autodl_watcher.training import TrainingServer, TrainingTracker, save_servers, parse_progress
+from autodl_watcher.training_config import TrainingServer, save_servers
+from autodl_watcher.training_tracker import TrainingTracker
+from autodl_watcher.training_events import parse_progress
 from autodl_watcher.training_ui import COLORS
 from test_training import snapshot, LOG
 
@@ -22,9 +25,9 @@ class TrainingWindowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.folder = Path(self.temp.name)
-        shutil.copyfile(gui.ROOT / "config.yaml", self.folder / "config.yaml")
+        shutil.copyfile(Path(__file__).parent / "fixtures/monitor.yaml", self.folder / "config.yaml")
         self.servers = [TrainingServer("s", "203-1", "server", entry="autodl-203-1"), TrainingServer("external", "4090", "other")]
-        save_servers(self.folder / ".ui/servers.json", self.servers)
+        save_servers(self.folder / ".ui/servers.yaml", self.servers)
         self.location = patch.object(gui, "ROOT", self.folder)
         self.location.start()
         self.refresh = patch.object(gui.WatcherWindow, "refresh")
@@ -37,6 +40,7 @@ class TrainingWindowTest(unittest.TestCase):
 
     def tearDown(self):
         self.window.training.stop_all()
+        wait_training(self.window.training)
         try:
             for timer in self.root.tk.call("after", "info"):
                 self.root.after_cancel(timer)
@@ -103,10 +107,32 @@ class TrainingWindowTest(unittest.TestCase):
         self.window.close()
         self.assertTrue(self.window.closing)
         self.assertTrue(self.root.winfo_exists())
-        self.window.training.receive(("external", generation, snapshot(), ""))
+        self.window.training.receive(("external", generation, snapshot(), ""));wait_training(self.window.training)
         self.assertFalse(state["busy"])
         self.assertIsNone(state["snapshot"])
         self.assertFalse(any(state["active"] for state in self.window.training.states.values()))
+
+    def test_busy_and_other_ai_revision_do_not_rebuild_visible_cards(self):
+        from types import SimpleNamespace
+        pane = self.window.training_pane
+        service = self.window.training
+        pane.service = SimpleNamespace(status=service.status, snapshot=service.snapshot, server=service.server, ai=service.ai)  # 视图仅需公开查询接口。
+        state = service.states["s"]
+        state.update(active=True, snapshot=state["tracker"].update(snapshot(now=time.time())))
+        state["connection"].samples, state["connection"].attempts = 7, 1  # 复用连接的计数必须继续呈现在摘要中。
+        pane.render()
+        self.assertIn("采集7次 / 连接尝试1次", pane.summary.cget("text"))
+        frames = pane.content.winfo_children()
+        state["busy"] = True
+        self.window.training.ai.revision += 1
+        pane.render()
+        self.assertEqual(pane.content.winfo_children(), frames)
+        self.assertEqual(str(pane.start_button.cget("state")), "disabled")
+        state["busy"] = False
+        self.window.training.reparse("s")
+        wait_training(self.window.training)
+        pane.render()
+        self.assertNotEqual(pane.content.winfo_children(), frames)
 
     def test_black_gpu_log_and_failure_card_stay_visible_after_disconnect_and_stop(self):
         pane = self.window.training_pane
@@ -148,7 +174,7 @@ class TrainingWindowTest(unittest.TestCase):
 
     def test_pending_config_can_be_saved_while_platform_and_training_are_running(self):
         from unittest.mock import Mock
-        from autodl_watcher.training import load_servers
+        from autodl_watcher.training_config import load_servers
         window = self.window
         state = window.training.states["s"]
         state.update(active=True, busy=True, snapshot=state["tracker"].update(snapshot(now=time.time())))

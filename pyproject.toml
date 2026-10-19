@@ -1,14 +1,11 @@
-# AutoDL GPU Watcher 项目配置
-# 构建系统：setuptools
-# Python 要求：>= 3.10
-# 依赖：PyYAML（配置解析）、python-dotenv（环境变量）、playwright（浏览器自动化）、requests（HTTP）
+# Python 安装、运行依赖和 EXE 构建工具配置。
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "autodl-gpu-watcher"
-version = "0.9.0.2"
+dynamic = ["version"]
 description = "Auto compute and training scheduler"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,8 +16,18 @@ dependencies = [
   "Pillow>=12.0,<13",
 ]
 
+[project.scripts]
+autodl-watcher = "autodl_watcher.launcher:gui_main"
+autodl-watcher-monitor = "autodl_watcher.launcher:monitor_main"
+
+[project.optional-dependencies]
+build = ["PyInstaller==6.22.3"]
+
+[tool.setuptools.dynamic]
+version = {attr = "autodl_watcher.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-autodl_watcher = ["default.ico"]
+autodl_watcher = ["default.ico", "defaults.yaml", "remote_probe.py"]

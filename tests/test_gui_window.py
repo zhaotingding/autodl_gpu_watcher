@@ -1,4 +1,5 @@
 import json
+import yaml
 from pathlib import Path
 import shutil
 import sys
@@ -15,7 +16,7 @@ class GuiWindowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.folder = Path(self.temp.name)
-        shutil.copyfile(gui.ROOT / "config.yaml", self.folder / "config.yaml")
+        shutil.copyfile(Path(__file__).parent / "fixtures/monitor.yaml", self.folder / "config.yaml")
         self.location = patch.object(gui, "ROOT", self.folder)
         self.location.start()
         self.refresh = patch.object(gui.WatcherWindow, "refresh")
@@ -166,6 +167,8 @@ class GuiWindowTest(unittest.TestCase):
         self.assertEqual(str(self.window.login_button["state"]), "normal")
 
     def test_login_profile_sync_is_pending_until_real_validation_message(self):
+        self.window.session_status = "invalid"  # 从真实过期状态重登，成功结果须覆盖旧状态。
+        self.window.session_text.set("登录会话已过期")
         checking = gui.SESSION_PREFIX + json.dumps(
             {"status": "checking", "message": "资料已同步，等待核验", "checked_at": "2026-09-26T16:00:00"})
         valid = gui.SESSION_PREFIX + json.dumps(
@@ -186,7 +189,7 @@ class GuiWindowTest(unittest.TestCase):
         self.window.user.set("任意用户名")
         self.window.poll.set("0.5")
         self.assertTrue(self.window.save())
-        settings = json.loads((self.folder / ".ui/preferences.json").read_text(encoding="utf-8"))
+        settings = yaml.safe_load((self.folder / ".ui/preferences.yaml").read_text(encoding="utf-8"))
         self.assertEqual(settings["entry"], "autodl-202-4")
         self.assertEqual(settings["user"], "任意用户名")
         self.assertEqual(settings["poll"], "0.5")
@@ -205,9 +208,9 @@ class GuiWindowTest(unittest.TestCase):
         self.assertIn("success", self.window.log.tag_names("2.0"))
         self.assertEqual(str(self.window.status_label.cget("foreground")), "#18733a")
         self.assertFalse(hasattr(self.window, "usage"))
-        self.assertEqual(len(self.window.inputs), 2)
+        self.assertEqual(len(self.window.settings_window.inputs), 2)
         self.assertTrue(self.window.save())
-        settings = json.loads((self.folder / ".ui/preferences.json").read_text(encoding="utf-8"))
+        settings = yaml.safe_load((self.folder / ".ui/preferences.yaml").read_text(encoding="utf-8"))
         self.assertNotIn("usage", settings)
 
     def test_report_error_and_normal_levels_cover_both_lines(self):
@@ -221,7 +224,7 @@ class GuiWindowTest(unittest.TestCase):
 
     def test_default_interval_and_legacy_preferences_migrate_once(self):
         self.assertEqual(float(self.window.poll.get()), 60)
-        preferences = self.folder / ".ui/preferences.json"
+        preferences = self.folder / ".ui/preferences.yaml"
         preferences.write_text(json.dumps({"poll": "30", "usage": "300", "user": "保留用户名", "entry": "autodl-203-1"}), encoding="utf-8")
         for expected in ("60", "120"):
             self.destroy_root()
@@ -232,7 +235,7 @@ class GuiWindowTest(unittest.TestCase):
             self.assertEqual(self.window.user.get(), "保留用户名")
             self.window.poll.set("120")
             self.assertTrue(self.window.save())
-        self.assertNotIn("usage", json.loads(preferences.read_text(encoding="utf-8")))
+        self.assertNotIn("usage", yaml.safe_load(preferences.read_text(encoding="utf-8")))
 
     def test_gpu_bars_use_physical_host_and_mark_stale_or_missing_data(self):
         from datetime import datetime, timedelta
@@ -279,11 +282,11 @@ class GuiWindowTest(unittest.TestCase):
         self.assertFalse(self.window.convert_no_gpu.get())
         self.window.table.set(self.window.selected_entry(), "target", "可开机")
         self.assertIn("--monitor-only", self.window._command())
-        self.window.live_check.invoke()
+        self.window.settings_window.live_check.invoke()
         self.assertTrue(self.window.live.get())
         self.assertIn("--live", self.window._command())
         self.window.convert_no_gpu.set(True)
-        self.window.live_check.invoke()
+        self.window.settings_window.live_check.invoke()
         self.assertFalse(self.window.live.get())
         self.assertFalse(self.window.convert_no_gpu.get())
         self.assertIn("--monitor-only", self.window._command())
@@ -297,7 +300,7 @@ class GuiWindowTest(unittest.TestCase):
                 self.window.poll.set("120")
                 self.window.user.set("保存用户名")
                 self.assertTrue(self.window.save())
-                saved = json.loads((self.folder / ".ui/preferences.json").read_text(encoding="utf-8"))
+                saved = yaml.safe_load((self.folder / ".ui/preferences.yaml").read_text(encoding="utf-8"))
                 self.assertEqual((saved["live"], saved["convert_no_gpu"]), (live, convert))
                 self.destroy_root()
                 self.root = tk.Tk()
@@ -316,7 +319,7 @@ class GuiWindowTest(unittest.TestCase):
         self.assertIn("--monitor-only", self.window._command())
 
     def test_checked_indicator_is_tick_and_output_has_event_colors(self):
-        self.assertEqual(self.window.live_check["style"], "Watcher.TCheckbutton")
+        self.assertEqual(self.window.settings_window.live_check["style"], "Watcher.TCheckbutton")
         style = gui.ttk.Style(self.root)
         self.assertIn("Watcher.indicator", style.element_names())
         unchecked, checked = self.window.check_images

@@ -119,8 +119,9 @@ def _resolve_path(base_dir: Path, value: str | Path) -> Path:  # 将配置中的
     return (base_dir / path).resolve()
 
 
-def load_config(path: str | Path = "config.yaml") -> AppConfig:  # 读取 YAML 配置，完成类型转换、路径解析与 dataclass 配置对象组装。
-    config_path = Path(path).resolve()
+def load_config(path: str | Path | None = None) -> AppConfig:  # 读取 YAML 配置，完成类型转换、路径解析与 dataclass 配置对象组装。
+    from .paths import default_config_path
+    config_path = Path(path if path is not None else default_config_path()).resolve()
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))  # 只解析 YAML 数据，不实例化任意 Python 对象。
     base_dir = config_path.parent  # 相对路径以 YAML 所在目录为基准，与启动时所在目录无关。
 

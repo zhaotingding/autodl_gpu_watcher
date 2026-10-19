@@ -18,17 +18,18 @@ from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
 from .app_icon import IconManager
-from .cli import normalize_host
+from .cli import normalize_host, positive_seconds
 from .config import load_config
 from .login import LocalStartupError
-from .main import positive_seconds
-from .training import TrainingServer, load_servers, save_servers
-from .training_ui import TrainingPane, TrainingService
+from .training_config import TrainingServer, load_servers, save_servers  # GUI 只读取训练配置边界，不加载解析聚合模块。
+from .training_ui import TrainingPane
+from .training_service import TrainingService
 from .training_ai_ui import AIAssistant
 from .session import GPU_PREFIX, REPORT_PREFIX, SESSION_PREFIX, emit_gpu_samples, emit_session
+from .paths import application_root, default_config_path, prepare_application, source_root
+from .yaml_settings import read_settings, settings_source, write_settings
 
-ROOT = (Path(os.environ.get("AUTODL_APP_ROOT", Path(sys.executable).parent)).resolve()
-        if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2])  # 配置和运行数据归属于源码根目录或公开 EXE 所在目录。
+ROOT = application_root()  # 所有启动入口共用源码/安装包/成品布局规则。
 DATA_PREFIX = "WATCHER_HOSTS "  # 约定的结构化输出前缀；主机列表与普通日志共用 stdout 管道。
 
 
@@ -75,7 +76,7 @@ def monitor_command(config, entry, user, poll, live, stop_file, convert_no_gpu=F
         raise ValueError("此入口尚未配置启用的开机实例，请先只读监控或在 config.yaml 配置 targets")
     if convert_no_gpu and not live:
         raise ValueError("无卡转有卡须同时启用真实自动开机")
-    command = worker_command("monitor", "--config", str(ROOT / "config.yaml"),
+    command = worker_command("monitor", "--config", str(default_config_path(ROOT)),
             "--host", normalize_host(entry), "--entry", entry, "--user", user.strip(),
             "--poll-seconds", str(poll), "--ui",
             "--live" if live else "--monitor-only", "--no-login", "--stop-file", str(stop_file))  # 参数列表直接传给进程，不经 shell 拼接。
@@ -84,8 +85,9 @@ def monitor_command(config, entry, user, poll, live, stop_file, convert_no_gpu=F
 
 class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main.run_monitor 执行。
     def __init__(self, root, debug=False):  # 先读基础配置和本地偏好，再创建控件与消息轮询。
+        prepare_application(ROOT)
         self.root = root  # Tk 主窗口及事件循环的拥有者，子线程不直接操作它。
-        self.config = load_config(ROOT / "config.yaml")  # YAML 提供目标实例、阈值、浏览器资料和运行路径。
+        self.config = load_config(default_config_path(ROOT))  # YAML 提供目标实例、阈值、浏览器资料和运行路径。
         self.local = ROOT / ".ui"  # 不纳入 Git 的个人偏好、停止信号和启动日志目录。
         self.local.mkdir(exist_ok=True)
         self.stop_file = self.local / f"stop-{os.getpid()}"  # 以 GUI 进程号区分停止信号，避免读取上一个窗口的信号。
@@ -106,8 +108,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self._gpu_render_key = None
         self.saved_entry = ""
         self.training = TrainingService(self.events)
-        self.training.ai = AIAssistant(root, self.local / "ai.json", self.training)
-        self.server_file = self.local / "servers.json"
+        self.training.ai = AIAssistant(root, self.local / "ai.yaml", self.training)
+        self.server_file = self.local / "servers.yaml"
         self.servers, self.external_panes = [], {}
         self.title_text = tk.StringVar(value="AutoDL 平台")
         try:
@@ -116,10 +118,10 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                 self.training.register(server)
         except (OSError, ValueError, TypeError) as exc:
             self.status.set(f"训练连接配置读取失败：{exc}")
-        preferences = self.local / "preferences.json"
-        if preferences.exists():
+        preferences = self.local / "preferences.yaml"
+        if settings_source(preferences).exists():
             try:
-                saved = json.loads(preferences.read_text(encoding="utf-8"))  # 缺失字段继续使用 YAML 默认值。
+                saved = read_settings(preferences)  # 缺失字段继续使用 YAML 默认值。
                 self.user.set(saved.get("user", self.user.get()))
                 self.poll.set("60" if "usage" in saved else saved.get("poll", self.poll.get()))  # 旧双间隔偏好一次迁移为60秒。
                 self.saved_entry = saved.get("entry", "")
@@ -135,7 +137,11 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self._populate([(item.machine_name, "待刷新", "未核验")
                         for item in self.config.auto_start.targets if item.enabled])
         self.root.after(100, self._drain)  # 将首次消息处理排入 Tk 事件队列，而不是阻塞等待后台输出。
-        self.root.after(0, self.refresh)  # 启动后只读核验，不开始监控或打开登录浏览器。
+        if self.config.telemetry.endpoint.strip():
+            self.root.after(0, self.refresh)  # 已配置平台仍沿用启动时只读核验。
+        else:
+            self.session_text.set("AutoDL 尚未配置 · 可先在全局设置中添加自己的 SSH 服务器")
+            self.status.set("欢迎使用 · 配置服务器后点击开始监控")
         self.root.protocol("WM_DELETE_WINDOW", self.close)  # 标题栏关闭按钮也走安全停止流程。
 
     def _build(self):  # 从上到下构建工具栏、服务器表、配置区、操作按钮和日志区。
@@ -182,7 +188,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.refresh_button.pack(side="left")
         self.login_button = ttk.Button(toolbar, text="登录 / 更新会话", command=self.login)
         self.login_button.pack(side="left", padx=5)
-        self.login_done = ttk.Button(toolbar, text="已登录并关闭浏览器", command=self.finish_login, state="disabled")
+        self.login_done = ttk.Button(toolbar, text="完成登录并关闭窗口", command=self.finish_login, state="disabled")
         self.login_done.pack(side="left")
         self.session_label = ttk.Label(page, textvariable=self.session_text, foreground="#7a5a18", wraplength=920)
         self.session_label.pack(anchor="w", pady=(0, 4))
@@ -210,8 +216,6 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.table.bind("<<TreeviewSelect>>", lambda event: self._render_gpus())
         self.gpu_panel = ttk.LabelFrame(left, text="物理 GPU", padding=(4, 3))
         self.gpu_panel.pack(fill="x", pady=4)
-        self.inputs = []
-        self.live_check = self.convert_check = self.save_button = None
         ttk.Label(left, text="参数及开机设置：右上角“全局设置”").pack(anchor="w", pady=3)
         controls = ttk.Frame(left)
         controls.pack(fill="x", pady=4)
@@ -234,25 +238,6 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.log.tag_configure("error", foreground="#ff8181")
         self.log.pack(fill="both", expand=True)
         self._server_tabs()
-
-    def build_monitor_settings(self, parent):
-        options = ttk.LabelFrame(parent, text="AutoDL 监控设置", padding=8)
-        options.pack(fill="x", pady=3)
-        self.inputs = []
-        for col, (label, value) in enumerate([("用户", self.user), ("间隔/秒", self.poll)]):
-            ttk.Label(options, text=label).grid(row=0, column=col * 2, sticky="w", padx=2)
-            entry = ttk.Entry(options, textvariable=value, width=12 if col == 0 else 6)
-            entry.grid(row=0, column=col * 2 + 1, sticky="ew", padx=2, pady=3)
-            options.columnconfigure(col * 2 + 1, weight=1)
-            self.inputs.append(entry)
-        self.live_check = ttk.Checkbutton(options, text="启用真实自动开机（会产生费用）", variable=self.live, style="Watcher.TCheckbutton",
-                                          command=lambda: self.convert_no_gpu.set(False) if not self.live.get() else None)
-        self.live_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=2)
-        self.convert_check = ttk.Checkbutton(options, text="关闭本账号全部无卡实例（会中断）", variable=self.convert_no_gpu, style="Watcher.TCheckbutton")
-        self.convert_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=2)
-        self.save_button = ttk.Button(parent, text="保存监控设置", command=self.save)
-        self.save_button.pack(anchor="e", padx=8, pady=8)
-        ttk.Label(parent, text="监控中可以编辑并保存；当前监控保持原设置，下次开始监控生效。", wraplength=700).pack(anchor="w", padx=8)
 
     def _server_tabs(self):
         for server in self.servers:
@@ -296,48 +281,27 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         window.lift()
         return window
 
-    def edit_server(self, server_id=None, entry=""):
-        from dataclasses import replace
+    def edit_server(self, server_id=None, entry=""):  # 所有入口共用全局设置中的连接编辑表单。
         server = next((item for item in self.servers if item.id == server_id), None)
         server = server or TrainingServer(entry or uuid.uuid4().hex, entry.removeprefix("autodl-") or "新服务器", "", entry=entry)
-        dialog = self.open_settings("servers")
-        form = dialog.server_form
-        for child in form.winfo_children():
-            child.destroy()
-        values = {}
-        fields = [("name", "显示名称"), ("ssh_alias", "SSH别名（用户.ssh/config）"), ("python", "远程Python路径"),
-                  ("project", "项目目录（可选，绝对路径）"), ("scripts", "脚本名/通配符（默认另识别tmux/日志）"), ("stalled_minutes", "无进展提醒（分钟）")]
-        for row, (key, label) in enumerate(fields):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            values[key] = tk.StringVar(value=str(getattr(server, key)))
-            ttk.Entry(form, textvariable=values[key], width=42).grid(row=row, column=1, sticky="ew", pady=4)
-        ttk.Label(form, text="使用已有SSH密钥和已核验主机；不会保存密码，也不会修改远端训练。\n首次连接请先在终端确认SSH可用。监控中可保存，新配置下次启动本服务器训练监控时生效。", wraplength=570).grid(row=6, column=0, columnspan=2, sticky="w", pady=8)
-        reason = ttk.Label(form, foreground="#b42318", wraplength=570)
-        reason.grid(row=7, column=0, columnspan=2, sticky="w")
-        def apply():
-            try:
-                updated = replace(server, **{key: value.get().strip() for key, value in values.items() if key != "stalled_minutes"},
-                                  stalled_minutes=float(values["stalled_minutes"].get())).validate()
-                servers = [updated if item.id == server.id else item for item in self.servers]
-                if not any(item.id == server.id for item in self.servers):
-                    servers.append(updated)
-                save_servers(self.server_file, servers)
-                self.servers = servers
-                self.training.register(updated)
-                self._training_columns()
-                self._server_tabs()
-                if updated.id in self.external_panes:
-                    page, title, pane = self.external_panes[updated.id]
-                    self.notebook.tab(page, text=updated.name)
-                    title.configure(text=updated.name)
-                    pane.render_key = None
-                    pane.render()
-                self._render_gpus()
-                dialog.refresh_servers()
-                reason.configure(text="连接已保存；监控中的连接下次启动生效。", foreground="#245c45")
-            except (ValueError, OSError) as exc:
-                reason.configure(text=str(exc))
-        ttk.Button(form, text="保存连接", command=apply).grid(row=8, column=1, sticky="e", pady=8)
+        self.open_settings("servers").edit_server(server)  # 主窗口仅选择编辑对象，控件由设置窗口拥有。
+
+    def save_server(self, updated):  # 先持久化，再通知训练服务；保存失败不能改变活动连接。
+        servers = [updated if item.id == updated.id else item for item in self.servers]  # 更新已有连接的静态配置。
+        if not any(item.id == updated.id for item in self.servers):
+            servers.append(updated)  # 新服务器通过同一保存路径加入。
+        save_servers(self.server_file, servers)  # 沿用原子 YAML 写入与配置校验。
+        self.servers = servers
+        self.training.register(updated)  # 正在监控时服务保存待生效配置，不替换活动连接。
+        self._training_columns()
+        self._server_tabs()
+        if updated.id in self.external_panes:
+            page, title, pane = self.external_panes[updated.id]
+            self.notebook.tab(page, text=updated.name)
+            title.configure(text=updated.name)
+            pane.render()  # pending 或 generation 的改变会触发卡片更新，无需改视图内部缓存。
+        self._render_gpus()
+        self.settings_window.refresh_servers()  # 已保存的连接立即进入全局连接列表。
 
     def _render_gpus(self):  # 使用采样消息更新条形图；此处不发起网络查询。
         entry = self.selected_entry()
@@ -402,8 +366,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         server = next((item for item in self.servers if item.entry == entry), None)
         if not server:
             return "未配置"
-        state = self.training.states[server.id]
-        snapshot = state["snapshot"]
+        state = self.training.status(server.id)
+        snapshot = self.training.snapshot(server.id)
         if state.get("pending"):
             return "已存待用"
         if snapshot and snapshot.get("error"):
@@ -435,9 +399,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             preferences = {"entry": self.selected_entry(), "user": self.user.get().strip(),
                            "poll": self.poll.get(), "live": self.live.get(),
                            "convert_no_gpu": self.live.get() and self.convert_no_gpu.get()}
-            temp = self.local / "preferences.tmp"
-            temp.write_text(json.dumps(preferences, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp.replace(self.local / "preferences.json")  # 临时文件写完整后替换，降低中断产生半份 JSON 的风险。
+            write_settings(self.local / "preferences.yaml", preferences)
             mode = "自动开机已开启" if "--live" in command else "仅监控，不执行开机或关机"
             self.status.set(f"设置已保存 · {mode}" + (" · 当前监控保持原设置，下次开始生效" if self.job == "monitor" else ""))
             return True
@@ -463,8 +425,9 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         if self.process is not None:  # 禁止同一窗口重复启动任务，避免同时占用浏览器资料。
             return
         env = os.environ.copy()
-        if not getattr(sys, "frozen", False):
-            env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+        checkout = source_root()  # 资料可在独立目录，子进程仍加载同一份源码。
+        if checkout is not None:
+            env["PYTHONPATH"] = str(checkout / "src") + os.pathsep + env.get("PYTHONPATH", "")
         env["AUTODL_APP_ROOT"] = str(ROOT)  # 后台 EXE 位于依赖目录，配置与运行数据仍归属于应用根目录。
         env["PYTHONUTF8"] = "1"  # 子进程日志使用 UTF-8，与读取管道时的解码一致。
         try:
@@ -482,7 +445,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             self._session("checking", "等待人工登录及同步后核验" if job == "login" else "正在核验真实主机接口")
         mode = "自动开机已开启" if "--live" in command else "仅监控，不执行开机或关机"
         self.status.set({"monitor": f"监控进程已启动 · {mode} · 等待首次采集", "discover": "正在读取实际服务器列表…",
-                         "login": "请在 Edge 登录并关闭窗口，然后点击“已登录并关闭浏览器”"}[job])
+                         "login": "请在专用 Edge 完成登录，再点击“完成登录并关闭窗口”"}[job])
         threading.Thread(target=self._read, args=(self.process,), daemon=True).start()  # 管道 readline 可以阻塞，因此放入后台线程。
 
     def _read(self, process):  # 子线程只传递消息，所有控件更新留在 Tk 主线程。
@@ -527,7 +490,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                             self._session("unknown", "核验未完成，后台任务失败，请重试" if value else "核验未完成，后台任务已结束，请重试")
                         self.status.set(self.session_message if self.session_status in {"invalid", "unknown"}
                                         else "任务已结束" if value == 0 else "任务失败 · 请查看日志并重试")
-                        if self.closing and not self.training.busy():
+                        if self.closing and self._shutdown_ready():
                             reschedule = False
                             self.root.destroy()
                             return
@@ -566,7 +529,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                     self.status.set(f"后台消息处理失败：{exc}")
         finally:
             if reschedule:
-                if self.closing and self.process is None and not self.training.busy():
+                if self.closing and self._shutdown_ready():
                     self.root.destroy()
                     return
                 if not self.closing:
@@ -603,19 +566,23 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
     def login(self):  # 浏览器由登录模块打开，验证码仍由用户手动完成。
         self._launch(worker_command("login"), "login")
 
-    def finish_login(self):  # 按钮代替控制台 Enter，让登录模块继续同步浏览器资料。
+    def finish_login(self):  # 按钮代替控制台 Enter，让登录模块正常关窗、等待保存并核验会话。
         if self.process is not None and self.job == "login" and self.process.poll() is None:
             try:
                 self.process.stdin.write("\n")
                 self.process.stdin.flush()  # 立即把换行发送给 input()，不能让它停留在 Python 缓冲区。
                 self.login_done.configure(state="disabled")
-                self.status.set("正在同步登录会话…")
+                self.status.set("正在关闭专用登录窗口并核验会话…")
             except (OSError, ValueError) as exc:
                 self.status.set(f"登录同步失败：{exc}")
 
+    def _shutdown_ready(self):
+        return (self.process is None and not self.training.busy()
+                and self.training.ai.shutdown_complete())
+
     def close(self):  # 空闲时立即关闭；任务运行中等待资源释放；登录中提示先完成同步。
         if self.process is not None and self.job == "login":
-            messagebox.showinfo("登录尚未完成", "请先关闭登录浏览器并点击“已登录并关闭浏览器”。", parent=self.root)
+            messagebox.showinfo("登录尚未完成", "请先完成登录，再点击“完成登录并关闭窗口”，等待会话核验结束。", parent=self.root)
         else:
             if not self.closing:
                 try:
@@ -624,9 +591,10 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                     messagebox.showerror("EXE图标未同步", str(exc), parent=self.root)
                     return
             self.closing = True
+            self.training.ai.begin_shutdown()  # 停止接单并有界收尾，不自动重发收费请求。
             self.training.stop_all()
             self.stop()
-            if self.process is None and not self.training.busy():
+            if self._shutdown_ready():
                 self.root.destroy()
             else:
                 self.status.set("正在等待后台任务安全结束后关闭窗口…")
@@ -657,7 +625,7 @@ def discovery_rows(config, hosts, instances):  # 只有账号真实实例UUID与
 def discover():  # 子进程模式：采集结果编码为一行 JSON，供父进程更新服务器表格。
     from .collectors import PlatformBrowserCollector, TelemetryApiCollector
     from .collectors.platform import PlatformAuthenticationError
-    config = load_config(ROOT / "config.yaml")
+    config = load_config(default_config_path(ROOT))
     collector = PlatformBrowserCollector(config.platform)
     try:
         emit_session("checking", "正在核验真实主机接口")

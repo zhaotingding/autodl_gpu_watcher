@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock
 
-from autodl_watcher.main import (
+from autodl_watcher.monitor_state import (
     _persisted_state_is_fresh,
     _restore_recent_evaluator_state,
 )
@@ -57,12 +57,10 @@ class StateRestoreV051Test(unittest.TestCase):
         evaluator.rearm_host.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class AbsenceDebounceV054Test(unittest.TestCase):
     def test_first_empty_snapshot_does_not_confirm_shutdown(self) -> None:
-        from autodl_watcher.main import _advance_absence_confirmation
+        from autodl_watcher.monitor_state import _advance_absence_confirmation
 
         streak, confirmed = _advance_absence_confirmation(
             previous_known=True,
@@ -76,7 +74,7 @@ class AbsenceDebounceV054Test(unittest.TestCase):
         self.assertFalse(confirmed)
 
     def test_second_consecutive_empty_snapshot_confirms_shutdown(self) -> None:
-        from autodl_watcher.main import _advance_absence_confirmation
+        from autodl_watcher.monitor_state import _advance_absence_confirmation
 
         streak, confirmed = _advance_absence_confirmation(
             previous_known=True,
@@ -90,7 +88,7 @@ class AbsenceDebounceV054Test(unittest.TestCase):
         self.assertTrue(confirmed)
 
     def test_failed_snapshot_breaks_absence_streak(self) -> None:
-        from autodl_watcher.main import _advance_absence_confirmation
+        from autodl_watcher.monitor_state import _advance_absence_confirmation
 
         streak, confirmed = _advance_absence_confirmation(
             previous_known=True,
@@ -102,3 +100,7 @@ class AbsenceDebounceV054Test(unittest.TestCase):
         )
         self.assertEqual(streak, 0)
         self.assertFalse(confirmed)
+
+
+if __name__ == "__main__":
+    unittest.main()

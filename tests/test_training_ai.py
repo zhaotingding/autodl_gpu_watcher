@@ -1,4 +1,5 @@
 import json
+import yaml
 from pathlib import Path
 import tempfile
 import threading
@@ -11,9 +12,10 @@ import requests
 from autodl_watcher import ai_credentials
 from autodl_watcher.training_ai import AnalysisError, analyze, decode_result, excerpt, save_settings, settings
 from autodl_watcher.training_ai_ui import AIAssistant, AISettings
-from autodl_watcher.training_ui import TrainingService
-from autodl_watcher.training import TrainingServer
+from autodl_watcher.training_service import TrainingService
+from autodl_watcher.training_config import TrainingServer
 from test_training import snapshot
+from training_helpers import wait_training
 import queue
 
 CONFIG = {"base_url": "https://example.com/v1", "protocol": "responses", "model": "example-model", "service_tier": "flex", "auto_generate": False}
@@ -83,9 +85,9 @@ class AIBackendTest(unittest.TestCase):
 
     def test_save_public_settings_without_key_or_msgx_namespace(self):
         with tempfile.TemporaryDirectory() as folder, patch('autodl_watcher.training_ai.ai_credentials.save') as save:
-            path=Path(folder)/'ai.json'
+            path=Path(folder)/'ai.yaml'
             save_settings(path,{**CONFIG,'api_key':'not-allowed'},'test-key')
-            self.assertEqual(json.loads(path.read_text()),settings(CONFIG))
+            self.assertEqual(yaml.safe_load(path.read_text()),settings(CONFIG))
             save.assert_called_once_with(CONFIG['base_url'],'test-key')
             self.assertTrue(ai_credentials._target(CONFIG['base_url']).startswith('autodl-watcher/'))
             self.assertNotEqual(ai_credentials._target(CONFIG['base_url']),ai_credentials._target('https://other.example/v1'))
@@ -133,7 +135,7 @@ class AIBackendTest(unittest.TestCase):
 class AIUITest(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
-        self.path=Path(self.temp.name)/'ai.json'
+        self.path=Path(self.temp.name)/'ai.yaml'
         self.path.write_text(json.dumps(CONFIG))
         self.root=tk.Tk();self.root.withdraw()
         self.service=TrainingService(queue.Queue())
@@ -168,9 +170,32 @@ class AIUITest(unittest.TestCase):
             dialog.reset_prompt();dialog.save()
             self.assertEqual(self.assistant.config['prompt'],DEFAULT_PROMPT)
             dialog.refresh_usage()
+            deadline=time.monotonic()+2
+            while dialog._usage_pending and time.monotonic()<deadline:
+                self.root.update();time.sleep(.01)
             self.assertIn('累计：0次请求',dialog.usage_text.get('1.0','end'))
             api.assert_not_called()
             dialog.destroy()
+
+    def test_usage_refresh_is_background_and_destroy_cancels_its_timer(self):
+        release, finished = threading.Event(), threading.Event()
+        with patch('autodl_watcher.training_ai.ai_credentials.read',return_value=''):
+            dialog = AISettings(self.root, self.path)
+        def slow_summary():
+            release.wait(2); finished.set(); return '模拟汇总'
+        with patch.object(dialog.usage, 'summary', side_effect=slow_summary):
+            started = time.monotonic(); dialog.refresh_usage()
+            self.assertLess(time.monotonic() - started, .1)
+            self.assertTrue(dialog._usage_pending)
+            dialog.destroy()
+            self.assertIsNone(dialog._usage_timer)
+            release.set()
+            deadline = time.monotonic() + 1  # 沿用原一秒界限，等待期间允许 Tk 处理主线程事件。
+            while not finished.is_set() and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(.01)
+            self.assertTrue(finished.is_set())  # 后台汇总应在窗口销毁后完成，且不重新建立计时器。
+            self.root.update()
 
     def test_generation_window_reports_current_card_fallback_and_later_recovery(self):
         from autodl_watcher.training_rules import task_identity
@@ -188,7 +213,7 @@ class AIUITest(unittest.TestCase):
 
     def test_manual_only_single_request_and_main_thread_result(self):
         started,release=threading.Event(),threading.Event()
-        def response(config,source,pid):
+        def response(config,source,pid,**kwargs):
             started.set();release.wait(3)
             return {'profile':RESULT,'model':'example-model','analyzed_at':time.time(),'service_tier':'flex'}
         card=dict(self.card)
@@ -204,13 +229,14 @@ class AIUITest(unittest.TestCase):
                 self.root.update();time.sleep(.02)
             self.assertIn('Dice',dialog.output.get('1.0','end'))
             self.assertEqual(card['status'],self.card['status'])
+            wait_training(self.service)
             self.assertIn('专用规则',self.service.states['s']['snapshot']['cards'][0]['rule_status'])
             api.assert_called_once()
             dialog.destroy();other.destroy();self.root.update()
 
     def test_close_pending_window_cancels_timer_and_preserves_lock_until_done(self):
         release=threading.Event()
-        def response(config,source,pid):
+        def response(config,source,pid,**kwargs):
             release.wait(3)
             raise AnalysisError('模拟失败')
         with patch('autodl_watcher.training_ai_ui.analyze',side_effect=response):

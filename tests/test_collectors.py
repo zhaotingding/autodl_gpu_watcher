@@ -192,8 +192,6 @@ class TelemetryRetryTest(unittest.TestCase):  # Telemetry 瞬时故障重试逻�
         sleep_mock.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class PlatformBrowserRecoveryV050Test(unittest.TestCase):
     def test_failed_browser_launch_releases_playwright_state(self) -> None:
@@ -331,6 +329,9 @@ class PlatformApiResponseCompatibilityV053Test(unittest.TestCase):  # v0.5.3: di
             status = 200
             ok = True
 
+            def dispose(self):
+                pass  # 对齐真实 Playwright APIResponse 的资源释放接口。
+
             @staticmethod
             def json():
                 return {
@@ -364,6 +365,9 @@ class PlatformApiResponseCompatibilityV053Test(unittest.TestCase):  # v0.5.3: di
             status = 200
             ok = True
 
+            def dispose(self):
+                pass  # 对齐真实 Playwright APIResponse 的资源释放接口。
+
             @staticmethod
             def json():
                 return {
@@ -385,7 +389,7 @@ class PlatformApiResponseCompatibilityV053Test(unittest.TestCase):  # v0.5.3: di
 class PlatformResponseBodyRecoveryTest(unittest.TestCase):
     @staticmethod
     def _response(error=None):
-        response = Mock(spec=["status", "json"])
+        response = Mock(spec=["status", "json", "dispose"])
         response.status = 200
         if error is not None:
             response.json.side_effect = error
@@ -987,3 +991,7 @@ class ApiTransportPrivacyTest(unittest.TestCase):
                     self.assertNotIn("TEST_PRIVATE_MARKER", output)
                     self.assertIn("结果未确认", output)
                     collector._context.request.post.assert_called_once()  # 电源请求超时可能已执行，不能为修日志而重试。
+
+
+if __name__ == "__main__":
+    unittest.main()

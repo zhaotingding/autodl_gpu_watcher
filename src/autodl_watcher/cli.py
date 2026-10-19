@@ -1,5 +1,7 @@
 from __future__ import annotations  # CLI 参数解析与主机名/入口名归一化。
 
+import argparse
+import math
 import re
 
 from .config import AutoStartConfig, AutoStartTarget
@@ -49,3 +51,13 @@ def select_cli_targets(
     return tuple(
         sorted( candidates, key=lambda item: (item.priority, item.machine_name, item.instance_uuid), )
     )
+
+
+def positive_seconds(value: str) -> float:  # 拒绝零、负数和非有限数。
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("间隔必须为正数") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("间隔必须为有限正数")
+    return seconds

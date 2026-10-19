@@ -55,7 +55,7 @@ def _ps_quote(value: str) -> str:  # PowerShell 单引号字符串转义。
     return value.replace("'", "''")
 
 
-def _edge_process_query_script(user_data_dir: Path, *, kill: bool) -> str:  # 构造只匹配指定 user-data-dir 的 Edge 进程查询/清理脚本。
+def _edge_process_query_script(user_data_dir: Path, *, kill: bool, close_windows: bool = False) -> str:  # 构造只匹配指定 user-data-dir 的 Edge 进程查询/清理脚本。
     marker = _ps_quote(str(user_data_dir))
     action = (
         "ForEach-Object { Stop-Process -Id $PSItem.ProcessId -Force "
@@ -63,9 +63,12 @@ def _edge_process_query_script(user_data_dir: Path, *, kill: bool) -> str:  # �
         if kill
         else "Select-Object -ExpandProperty CommandLine"
     )
+    if close_windows:  # 只向该专用profile所属进程发送正常关窗请求，保留浏览器写盘机会。
+        action = ("ForEach-Object { $edge = Get-Process -Id $PSItem.ProcessId "
+                  "-ErrorAction SilentlyContinue; if ($edge) { $null = $edge.CloseMainWindow() } }")
     return (
         "$p='" + marker + "'; "
-        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+        "Get-CimInstance Win32_Process -ErrorAction Stop | "
         "Where-Object { $PSItem.Name -eq 'msedge.exe' -and "
         "$PSItem.CommandLine -and $PSItem.CommandLine.Contains($p) } | "
         + action
@@ -102,7 +105,7 @@ def edge_process_command_lines(user_data_dir: Path) -> list[str]:  # 读取使�
         creationflags=subprocess.CREATE_NO_WINDOW,  # 只隐藏 PowerShell 辅助进程，人工登录的 Edge 窗口仍然可见。
     )
     if completed.returncode != 0:
-        return []
+        raise LocalStartupError("无法查询专用 Edge 进程，已停止登录资料同步；请重试")  # 查询失败不能当成浏览器已经退出。
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
@@ -124,6 +127,19 @@ def terminate_profile_edge_processes(user_data_dir: Path) -> None:  # 静默关�
         check=False,
         creationflags=subprocess.CREATE_NO_WINDOW,  # 只隐藏 PowerShell 辅助进程，人工登录的 Edge 窗口仍然可见。
     )
+
+
+def close_profile_edge_windows(user_data_dir: Path) -> None:  # 用户确认登录后，正常关闭本程序专用Edge窗口。
+    if os.name != "nt":
+        return
+    completed = subprocess.run(
+        [_powershell_executable(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-Command", _edge_process_query_script(user_data_dir, kill=False, close_windows=True)],
+        capture_output=True, text=True, check=False,
+        creationflags=subprocess.CREATE_NO_WINDOW,  # 辅助进程隐藏，正常关窗交给Edge自身处理。
+    )
+    if completed.returncode != 0:
+        raise LocalStartupError("无法请求关闭登录 Edge，未同步登录资料；请手动关闭登录窗口后重试")
 
 
 def automation_flags_present(user_data_dir: Path) -> bool:  # 判断指定 profile 的 Edge 是否混入 Playwright/自动化启动参数。
@@ -163,7 +179,8 @@ def remove_stale_profile_locks(user_data_dir: Path) -> None:  # 在相关 Edge �
 
 def prepare_profile_for_exclusive_use(user_data_dir: Path) -> None:  # 彻底释放 watcher 专用 profile，避免残留 Edge/锁文件导致启动失败。
     terminate_profile_edge_processes(user_data_dir)
-    wait_for_profile_edge_exit(user_data_dir)
+    if not wait_for_profile_edge_exit(user_data_dir):  # 未释放的 profile 不能删锁或交给另一个进程。
+        raise RuntimeError("专用 Edge 尚未退出，已停止操作登录资料；请关闭该窗口后重试")
     remove_stale_profile_locks(user_data_dir)
 
 
@@ -175,7 +192,8 @@ def launch_native_edge(
     proxy_bypass_list: str = "",
 ) -> subprocess.Popen[bytes]:  # 启动不受 Playwright 控制的普通 Edge。
     user_data_dir.mkdir(parents=True, exist_ok=True)
-    command = [ str(edge_path), f"--user-data-dir={user_data_dir}", "--new-window", ]
+    command = [str(edge_path), f"--user-data-dir={user_data_dir}", "--new-window",
+               "--disable-background-mode"]  # 关闭登录窗口后正常退出，避免后台模式阻碍资料交接。
     if proxy_bypass_list.strip():
         command.append(f"--proxy-bypass-list={proxy_bypass_list.strip()}")
     command.append(page_url)
@@ -194,7 +212,10 @@ def sync_login_profile_to_browser(login_profile: Path, browser_profile: Path) ->
     if not login_profile.exists():
         raise RuntimeError(f"登录 profile 不存在：{login_profile}")
 
-    prepare_profile_for_exclusive_use(login_profile)
+    close_profile_edge_windows(login_profile)  # 确认按钮负责正常关窗，不能仅等待用户已经关闭。
+    if not wait_for_profile_edge_exit(login_profile, timeout_seconds=30.0):  # 给人工登录正常写盘留出时间，不强杀源浏览器。
+        raise RuntimeError("登录 Edge 尚未退出，未同步或覆盖监控资料；请处理该窗口的关闭确认并关闭后重试")
+    remove_stale_profile_locks(login_profile)  # 确认进程已退出后才移除失效锁。
     prepare_profile_for_exclusive_use(browser_profile)
 
     if browser_profile.exists():
@@ -238,8 +259,8 @@ def interactive_login(config: AppConfig | None = None, *, reason: str = "manual"
         print("正在打开普通 Microsoft Edge 登录窗口。")
 
     print("该窗口使用独立 native_login_profile，不带 Playwright 的 --no-sandbox / headless 参数。")
-    print("完成 AutoDL 登录并确认能看到“所有主机”后，关闭这个 Edge 窗口。")
-    print("然后回到此终端按 Enter；验证码仍需手动完成。")
+    print("完成 AutoDL 登录并确认能看到“所有主机”后，点击程序的“完成登录并关闭窗口”。")
+    print("终端模式按 Enter 继续；程序会正常关闭专用登录窗口并等待保存，验证码仍需手动完成。")
 
     bypass = (
         config.platform.proxy_bypass_list
@@ -268,8 +289,8 @@ def interactive_login(config: AppConfig | None = None, *, reason: str = "manual"
             prepare_profile_for_exclusive_use(clean_profile)
             raise RuntimeError( "普通 Edge 仍检测到自动化启动参数。为避免验证码继续失败，已主动停止登录。" )
 
-    input("\n登录完成并关闭 Edge 后按 Enter：")
-    prepare_profile_for_exclusive_use(clean_profile)
+    input("\n登录完成后按 Enter，正常关闭专用 Edge 并同步：")
+    emit_session("checking", "正在正常关闭登录 Edge，等待保存登录资料")  # 与认证失败区分，避免仍显示上一次过期结果。
     sync_login_profile_to_browser(clean_profile, browser_profile)
     print("登录资料已同步，实际会话状态仍待接口核验。")
     emit_session("checking", "登录资料已同步，等待实际接口核验")
@@ -280,7 +301,9 @@ def main() -> None:
 
     collector = None
     try:
-        config = load_config()
+        from .paths import prepare_application, default_config_path
+        prepare_application()
+        config = load_config(default_config_path())
         interactive_login(config, reason="manual")
         emit_session("checking", "正在核验同步后的登录会话")
         collector = PlatformBrowserCollector(config.platform)

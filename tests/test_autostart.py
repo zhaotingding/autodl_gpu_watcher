@@ -447,6 +447,20 @@ class NoGpuConversionTest(unittest.TestCase):
         self.assertEqual(self.platform.post_api_json.call_count, 1)
         self.assertEqual(starter.pending_switch, self.first)
 
+    def test_conversion_rechecks_final_instance_after_account_release_check(self):
+        self.platform.collect.return_value = [self.before]
+        initial = {"status": "shutdown", "start_mode": "non_gpu", "host_account_gpu_clear": True}
+        for final in ({**initial, "host_account_gpu_clear": False},
+                      {**initial, "status": "starting"}, RuntimeError("instance query unavailable")):
+            with self.subTest(final=final):
+                self.platform.reset_mock()  # 每种最终变化均从同一已关机状态重新开始。
+                self.platform.get_instance_state.side_effect = [initial, final]
+                result = self._starter().attempt(self.alert)
+                self.assertEqual(result.status, "instance_state_blocked")
+                self.assertEqual(self.platform.get_instance_state.call_count, 2)  # 不能把释放前状态复用于最终开机检查。
+                self.platform.get_account_instances.assert_called_once_with(require_personal_scope=True)
+                self.platform.post_api_json.assert_not_called()  # 新占用、过渡状态或查询失败都不能开机。
+
     def test_other_account_gpu_or_missing_proof_blocks_state_change(self):
         self.platform.collect.return_value = [self.before]
         for proof in (False, None):

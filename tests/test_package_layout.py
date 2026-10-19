@@ -36,17 +36,6 @@ class PackageLayoutTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.root = Path(__file__).resolve().parents[1]
 
-    def test_clean_edge_script_does_not_contain_cmd_caret_pipe(self) -> None:
-        script = (self.root / "tools" / "clean_watcher_edge.ps1").read_text( encoding="ascii" )
-        self.assertNotIn("^|", script)
-        self.assertIn("Get-CimInstance", script)
-        self.assertIn("Stop-Process", script)
-
-    def test_main_does_not_restore_live_ownership_from_sqlite(self) -> None:
-        source = (self.root / "src" / "autodl_watcher" / "main.py").read_text(encoding="utf-8")
-        self.assertNotIn("current_instances()", source)
-        self.assertNotIn("restored_owned_hint", source)
-
     def test_frozen_startup_uses_executable_folder_for_logs(self):
         entry = runpy.run_path(str(self.root / "tools/gui_entry.py"))["main"]
         previous_directory, previous_path = Path.cwd(), sys.path[:]
@@ -81,7 +70,7 @@ class PackageLayoutTest(unittest.TestCase):
             profile = release / "runtime/browser_profile/preserved.txt"
             profile.write_text("user data", encoding="utf-8")
             (release / "config.yaml").write_text("user settings", encoding="utf-8")
-            preserved = {".ui/preferences.json": "user preferences", ".env": "user environment",
+            preserved = {".ui/preferences.yaml": "user preferences", ".env": "user environment",
                          "dist/AutoDLWatcher/runtime/old-profile.txt": "old release data"}
             for name, content in preserved.items():
                 path = root / name
@@ -117,7 +106,7 @@ class PackageLayoutTest(unittest.TestCase):
             self.assertEqual(struct.unpack_from("<H", data, header + 24 + 68)[0], subsystem)
         with tempfile.TemporaryDirectory(prefix="autodl exe test ") as directory:
             folder = Path(directory)
-            (folder / "config.yaml").write_bytes((self.root / "config.yaml").read_bytes())
+            (folder / "config.yaml").write_bytes((self.root / "tests/fixtures/monitor.yaml").read_bytes())
             stop = folder / "stop"
             stop.touch()
             env = os.environ.copy()
@@ -125,7 +114,7 @@ class PackageLayoutTest(unittest.TestCase):
             env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
             env.pop("PYTHONPATH", None)
             env.pop("PYTHONHOME", None)
-            result = subprocess.run([str(worker), "monitor", "--dry-run", "--no-login",
+            result = subprocess.run([str(worker), "monitor", "--monitor-only", "--no-login",
                                      "--stop-file", str(stop), "--runtime-dir", str(folder)],
                                     cwd=folder, env=env, capture_output=True, text=True,
                                     encoding="utf-8", timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)

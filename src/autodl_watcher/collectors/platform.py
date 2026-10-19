@@ -4,6 +4,7 @@ import os
 import re
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,11 @@ class PlatformAuthenticationError(RuntimeError):  # 已得到明确认证失败�
 
 
 class PlatformTransientError(RuntimeError):  # 平台页面/API 暂时不可用，但没有证据表明登录已经失效。
+    pass
+
+
+class InstanceIdentityError(PlatformTransientError):
+    """配置 UUID 在完整账号列表中缺失或重复；展示和决策不用比较中文文案。"""
     pass
 
 
@@ -326,22 +332,11 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
         if not self._authorization or self._machine_list_payload is None:
             raise PlatformTransientError("尚未捕获到可复用的 machine/list 请求上下文")
 
-        url = f"{self.config.api_base_url.rstrip('/')}/{self.config.api_path_contains.lstrip('/')}"
         last_error: Exception | None = None
         for attempt in range(1, self.config.max_attempts + 1):
             try:
-                response = self._context.request.post(
-                    url,
-                    data=self._machine_list_payload,
-                    headers={
-                        "Accept": "application/json, text/plain, */*",
-                        "Authorization": self._authorization,
-                        "Origin": self.config.api_base_url.rstrip('/'),
-                        "Referer": self.config.page_url,
-                    },
-                    timeout=self.config.response_timeout_seconds * 1000,
-                )
-                return self._parse_machine_list_response(response)
+                with self._api_response(self.config.api_path_contains, self._machine_list_payload) as response:
+                    return self._parse_machine_list_response(response)
             except PlatformAuthenticationError:
                 raise
             except (PlatformTransientError, PlaywrightError) as exc:
@@ -386,6 +381,25 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
 
             raise PlatformTransientError( f"AutoDL 控制台仍在 {current_url}，但本轮未能可靠读取主机列表响应；" "没有登录失效证据，本轮仅跳过开机。" ) from exc
 
+    @contextmanager
+    def _api_response(self, path: str, payload: dict[str, Any]):
+        """同源请求复用浏览器上下文，响应体消费后立即释放；电源请求不在这里重试。"""
+        response = self._context.request.post(
+            f"{self.config.api_base_url.rstrip('/')}/{path.lstrip('/')}",
+            data=payload,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Authorization": self._authorization,
+                "Origin": self.config.api_base_url.rstrip('/'),
+                "Referer": self.config.page_url,
+            },
+            timeout=self.config.response_timeout_seconds * 1000,
+        )
+        try:
+            yield response
+        finally:
+            response.dispose()  # APIResponse 不随 Python 引用回收；每轮保留会占用 context 的响应体存储。
+
     def post_api_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:  # 使用已保存的浏览器会话发送同源 POST API 请求。
         self.start()
         assert self._context is not None
@@ -395,24 +409,13 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
         if self._authorization is None:
             raise PlatformTransientError( "当前页面未捕获到 Authorization；没有 401/403 或 /login 证据，" "本轮不按登录失效处理。" )
 
-        url = f"{self.config.api_base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
-            response = self._context.request.post(
-                url,
-                data=payload,
-                headers={
-                    "Accept": "application/json, text/plain, */*",
-                    "Authorization": self._authorization,
-                    "Origin": self.config.api_base_url.rstrip('/'),
-                    "Referer": self.config.page_url,
-                },
-                timeout=self.config.response_timeout_seconds * 1000,
-            )
-            if response.status == 401 or response.status == 403:
-                raise PlatformAuthenticationError( f"AutoDL API 返回 HTTP {response.status}；登录会话可能已失效。" )
-            if not response.ok:
-                raise RuntimeError(f"AutoDL API {path} returned HTTP {response.status}")
-            payload_json = response.json()
+            with self._api_response(path, payload) as response:
+                if response.status in {401, 403}:
+                    raise PlatformAuthenticationError(f"AutoDL API 返回 HTTP {response.status}；登录会话可能已失效。")
+                if not response.ok:
+                    raise RuntimeError(f"AutoDL API {path} returned HTTP {response.status}")
+                payload_json = response.json()
         except PlaywrightError:
             raise PlatformTransientError(f"AutoDL API {path} 传输或响应读取失败，结果未确认") from None  # 原始Call log可能含Authorization；电源请求不重试。
         if not isinstance(payload_json, dict):
@@ -511,7 +514,7 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
         all_rows = self.get_account_instances()
         matches = [row for row in all_rows if row["instance_uuid"] == instance_uuid]
         if len(matches) != 1:
-            raise PlatformTransientError("实例列表中目标 UUID 缺失或重复")
+            raise InstanceIdentityError("实例列表中目标 UUID 缺失或重复")
         if matches[0].get("machine_name") != machine_name:
             raise PlatformTransientError("目标实例 UUID 与配置入口名不匹配")
         status = matches[0].get("status")

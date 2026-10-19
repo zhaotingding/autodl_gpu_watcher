@@ -1,3 +1,4 @@
+from training_helpers import wait_training
 import copy
 import json
 from pathlib import Path
@@ -7,10 +8,12 @@ import time
 import unittest
 from unittest.mock import patch
 
-from autodl_watcher.training import TrainingTracker, TrainingServer
+from autodl_watcher.training_tracker import TrainingTracker
+from autodl_watcher.training_config import TrainingServer
+from autodl_watcher.training_events import parse_progress
 from autodl_watcher.training_ai import AnalysisError
 from autodl_watcher.training_rules import validate_profile, parse_rules, RuleStore, task_identity
-from autodl_watcher.training_ui import TrainingService
+from autodl_watcher.training_service import TrainingService
 from autodl_watcher.training_ai_ui import AIAssistant
 from test_training import snapshot
 
@@ -26,6 +29,24 @@ class RuleEngineTest(unittest.TestCase):
         self.assertEqual((event['epoch'],event['step']),(3,80))
         self.assertEqual(event['metrics']['new_metric'],.5)
         self.assertEqual(parse_rules(profile,updated,99),[])
+
+    def test_default_and_custom_rules_share_nested_metric_semantics(self):
+        values = {"pid": 10, "epoch": 2, "step": 30, "metrics":
+                  {"quality": {"PSNR": 32.1}, "loss": 2e-6, "ready": True}}  # 布尔标志不当作数值指标。
+        for body in (json.dumps(values), repr(values)):  # 同时保留标准JSON和实际Python字典日志兼容。
+            with self.subTest(body=body):
+                line = "2026-10-15T08:00:00+08:00 " + body
+                rule = {"format": "json", "phase": "train", "metrics_path": "metrics",
+                        "fields": {"pid": "pid", "epoch": "epoch", "step": "step"}, "example": line}
+                profile = validate_profile({"name": "自定义指标", "rules": [rule]}, line, 10)
+                text = "warming up\r\x1b[32m" + line + "\x1b[0m"  # 控制序列去除后仍须保持原记录行号。
+                default = parse_progress(text, expected_pid=10)
+                index, event = parse_rules(profile, text, 10, with_lines=True)[0]
+                self.assertEqual(index, default["progress_line"])
+                self.assertEqual(event["metrics"], default["observations"]["metrics"])
+                self.assertEqual(event["metrics"], {"quality/PSNR": 32.1, "loss": 2e-6})
+                self.assertEqual((event["epoch"], event["step"]), (default["epoch"], default["step"]))
+                self.assertEqual(event["time"], "2026-10-15T08:00:00+08:00")
 
     def test_text_template_test_phase_and_branch(self):
         line="EPOCH_DONE joint 9 16182 source_best 9 val {'auc':0.98,'ce':0.2}"
@@ -145,7 +166,7 @@ class RuleEngineTest(unittest.TestCase):
 
 class RuleAutomationTest(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)/'ai.json'
+        self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)/'ai.yaml'
         self.path.write_text(json.dumps({'base_url':'https://example.com/v1','model':'test','auto_generate':True}))
         self.service=TrainingService(queue.Queue())
         self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
@@ -158,7 +179,7 @@ class RuleAutomationTest(unittest.TestCase):
         deadline=time.monotonic()+3
         while self.ai.busy and time.monotonic()<deadline:
             self.ai.poll();time.sleep(.01)
-        self.assertFalse(self.ai.busy)
+        self.assertFalse(self.ai.busy);self.ai.poll();wait_training(self.service)
 
     def test_auto_once_reuse_after_reload_and_apply_to_card(self):
         with patch('autodl_watcher.training_ai_ui.analyze',return_value={'profile':PROFILE,'service_tier':'flex'}) as api:
@@ -168,8 +189,8 @@ class RuleAutomationTest(unittest.TestCase):
             self.assertEqual(api.call_count,1)
             self.assertEqual(self.service.states['s']['snapshot']['received_at'],stamp)
             self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
-            self.ai.tick();self.assertFalse(self.ai.busy);self.assertEqual(api.call_count,1)
-            self.service.reparse('s')
+            self.ai.tick();self.assertFalse(self.ai.busy);self.ai.poll();wait_training(self.service);self.assertEqual(api.call_count,1)
+            self.service.reparse('s');wait_training(self.service)
             self.assertIn('专用规则已启用',self.service.states['s']['snapshot']['cards'][0]['rule_status'])
 
     def test_failure_not_repeated_each_sample_or_restart(self):
@@ -187,11 +208,11 @@ class RuleAutomationTest(unittest.TestCase):
         self.ai.store.put(identity,{'profile':PROFILE,'log_path':card['log_path'],'message':'专用规则已生成'})
         from threading import Event
         release=Event()
-        def fail(*args):
+        def fail(*args, **kwargs):
             release.wait(3)
             raise AnalysisError('AI返回空规则')
         with patch('autodl_watcher.training_ai_ui.analyze',side_effect=fail) as api:
-            self.ai.generate('s',card,LINE)
+            self.ai.generate('s',card,LINE);wait_training(self.service)
             current=self.service.states['s']['snapshot']['cards'][0]
             self.assertIn('专用规则已启用',current['rule_status'])
             self.assertEqual(current['progress']['step'],40)
@@ -220,7 +241,7 @@ class RuleAutomationTest(unittest.TestCase):
         self.ai.store.put(task_identity(self.server,card),{'profile':PROFILE,'log_path':card['log_path'],'message':'正在更新专用规则','attempted':True})
         self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
         with patch('autodl_watcher.training_ai_ui.analyze') as api:
-            self.ai.tick();self.service.reparse('s');api.assert_not_called()
+            self.ai.tick();self.service.reparse('s');wait_training(self.service);api.assert_not_called()
         status=self.service.states['s']['snapshot']['cards'][0]['rule_status']
         self.assertIn('专用规则已启用',status)
         self.assertIn('上次规则请求未完成',status)
@@ -237,11 +258,11 @@ class RuleAutomationTest(unittest.TestCase):
             self.assertEqual(len(self.ai.store.entries),2)
 
     def test_bad_cache_pauses_auto_and_shows_reason_on_card(self):
-        self.path.with_name('training_rules.json').write_text('{bad json')
+        self.path.with_name('training_rules.yaml').write_text('{bad json')
         self.ai=AIAssistant(None,self.path,self.service);self.service.ai=self.ai
         with patch('autodl_watcher.training_ai_ui.analyze') as api:
             self.ai.tick();api.assert_not_called()
-            self.service.reparse('s')
+            self.service.reparse('s');wait_training(self.service)
         self.assertIn('规则缓存无法读取',self.service.states['s']['snapshot']['cards'][0]['rule_status'])
 
     def test_no_auto_without_opt_in_and_no_live_key_read(self):

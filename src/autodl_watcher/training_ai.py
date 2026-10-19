@@ -3,19 +3,70 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import threading
 import time
 from urllib.parse import urlsplit
 
 import requests
 from . import ai_credentials
-from .training_rules import EmptyRulesError, dictionary, local_profile, validate_profile
+from .training_events import ANSI_ESCAPE, dictionary  # 日志清理与字典解析统一使用纯事件层。
+from .training_rules import EmptyRulesError, local_profile, validate_profile
 from .training_ai_usage import pricing_settings, tokens, estimate
+from .yaml_settings import read_settings, settings_source, write_settings
 
 DEFAULTS = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "service_tier": "flex"}
 
 
 class AnalysisError(ValueError):
     pass
+
+
+class AnalysisControl:
+    """一次请求的取消信号和已知用量；不持有 Tk 对象，也不发起重试。"""
+    def __init__(self):
+        self._cancel = threading.Event()
+        self._socket = None
+        self.on_call = None
+
+    @property
+    def cancelled(self):
+        return self._cancel.is_set()
+
+    def check(self):
+        if self.cancelled:
+            raise AnalysisError("AI 请求已取消；费用可能已产生，未自动重试")
+
+    def bind(self, response):
+        # requests 没有公开的跨线程取消 API；仅中断本次 urllib3 响应的连接。
+        connection = getattr(response.raw, "_connection", None)
+        self._socket = getattr(connection, "sock", None)
+        if self._socket is None:
+            stream = getattr(getattr(response.raw, "_fp", None), "fp", None)
+            self._socket = getattr(getattr(stream, "raw", None), "_sock", None)
+        if self.cancelled:
+            self.cancel()
+
+    def cancel(self):
+        self._cancel.set()
+        if self._socket is not None:
+            try:
+                self._socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # 请求线程可能已经正常关闭连接；取消信号仍然生效。
+
+    def publish(self, call):
+        if self.on_call:
+            self.on_call(dict(call))
+
+
+def interrupted_call(config, started_at, known=None):
+    """关闭预算耗尽时保留已收到用量，缺失部分明确为未知。"""
+    call = dict(known or {"time": started_at, "model": config["model"], "base_url": config["base_url"],
+                         "requested_tier": config["service_tier"], "tokens": tokens(None)})
+    call["status"] = "请求中断"
+    call.update(estimate(call, config))
+    return call
 
 
 def settings(values):
@@ -39,22 +90,21 @@ def settings(values):
 
 
 def load_settings(path):
-    if not path.exists():
+    if not settings_source(path).exists():
         return {**DEFAULTS, "auto_generate": False}
-    return settings(json.loads(path.read_text(encoding="utf-8")))
+    return settings(read_settings(path))
 
 
 def save_settings(path, values, key=""):
     config = settings(values)
     if key.strip():
         ai_credentials.save(config["base_url"], key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_settings(path, config)
     return config
 
 
 def excerpt(text):
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)[-12000:]
+    text = ANSI_ESCAPE.sub("", text)[-12000:]  # 与监控解析共用颜色清理，随后按原上限截取并脱敏。
     text = re.sub(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?)(?:bearer\s+)?[^\s,\"'}]+", r"\1[已隐藏]", text)
     text = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|password|secret)[\"']?\s*[:=]\s*[\"']?)[^\s,\"'}]+", r"\1[已隐藏]", text)
     return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "[已隐藏]", text)
@@ -90,11 +140,13 @@ def decode_result(text, source, pid=None):
     return validate_profile(value, source, pid)
 
 
-def _stream(response, protocol, seconds=180, metadata=None):
+def _stream(response, protocol, seconds=180, metadata=None, control=None, observe=None):
     metadata = metadata if metadata is not None else {}
     parts, tier, stopped = [], "", False
     size, started = 0, time.monotonic()
     for line in response.iter_lines():
+        if control:
+            control.check()
         if time.monotonic() - started > seconds:
             raise AnalysisError("AI 响应等待超时；继续默认监控，不会自动重试")
         if not line or not line.startswith(b"data:"):
@@ -117,6 +169,8 @@ def _stream(response, protocol, seconds=180, metadata=None):
         for name in ("usage", "model", "service_tier"):
             if final.get(name) is not None:
                 metadata[name] = final[name]
+        if observe:
+            observe()  # 在后续流式读取前保存已返回用量，退出时不依赖最终完成事件。
         tier = metadata.get("service_tier") or tier
         if protocol == "responses":
             kind = event.get("type")
@@ -145,8 +199,10 @@ def _stream(response, protocol, seconds=180, metadata=None):
     raise AnalysisError("AI 连接结束但未收到完成标记；本次结果未采用，不会自动重试")
 
 
-def analyze(config, source, pid=None):
+def analyze(config, source, pid=None, *, control=None):
     config = settings(config)  # 每次请求使用启动时的配置快照。
+    if control:
+        control.check()
     source = excerpt(source)
     log_pids = set()
     for line in source.splitlines():
@@ -174,15 +230,25 @@ def analyze(config, source, pid=None):
     metadata = {}
     call = {"time": time.time(), "model": config["model"], "base_url": config["base_url"],
             "requested_tier": config["service_tier"], "status": "请求失败"}
+    def observe():
+        call.update(actual_model=metadata.get("model", ""), actual_tier=metadata.get("service_tier", ""),
+                    tokens=tokens(metadata.get("usage")))
+        call.update(estimate(call, config))
+        if control:
+            control.publish(call)
+    observe()
     failure = None
     note = ""
     try:
         with requests.Session() as session:
             with session.post(config["base_url"] + route, json=payload, headers={"Authorization": "Bearer " + key},
                               timeout=(10, seconds), stream=True, allow_redirects=False) as response:
+                if control:
+                    control.bind(response)
+                    control.check()
                 if response.status_code != 200:
                     raise AnalysisError(f"API 返回 HTTP {response.status_code}；请检查配置、额度或服务状态；未自动重试")
-                text, tier = _stream(response, config["protocol"], seconds, metadata)
+                text, tier = _stream(response, config["protocol"], seconds, metadata, control, observe)
                 call["status"] = "规则验证失败"
                 try:
                     profile = decode_result(text, source, pid)
@@ -193,11 +259,13 @@ def analyze(config, source, pid=None):
                     note = "AI返回空规则；已生成并验证本地结构化日志专用规则，未自动重试"
                 call["status"] = "规则有效"
     except requests.RequestException:
-        failure = AnalysisError("API 网络连接失败或超时；未自动重试，请确认服务端账单后再手动尝试")
+        failure = AnalysisError("AI 请求已取消；费用可能已产生，未自动重试" if control and control.cancelled else
+                                "API 网络连接失败或超时；未自动重试，请确认服务端账单后再手动尝试")
     except ValueError as exc:
         failure = AnalysisError(str(exc))
-    call.update(actual_model=metadata.get("model", ""), actual_tier=metadata.get("service_tier", ""), tokens=tokens(metadata.get("usage")))
-    call.update(estimate(call, config))
+    if control and control.cancelled:
+        call["status"] = "请求中断"
+    observe()
     if failure:
         failure.call = call  # 已消耗Token的无效规则/失败请求也交给账本，不能当成零费用。
         raise failure

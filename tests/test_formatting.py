@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 
 from autodl_watcher.autostart import StartAttemptResult, format_start_result
-from autodl_watcher.main import (
+from autodl_watcher.monitor_state import (
     _owned_instances_from_records,
 )
 from autodl_watcher.models import AvailabilityAlert, ConfirmedGpu, OccupancyRecord

@@ -10,3 +10,10 @@ __pycache__/
 dist/
 /AutoDLWatcher.exe
 /_internal/
+
+# Python 安装与 wheel 构建的可再生产物。
+*.egg-info/
+/build/
+
+# 当前机器的基础配置；仓库 config.yaml 只提供安全示例。
+/config.local.yaml

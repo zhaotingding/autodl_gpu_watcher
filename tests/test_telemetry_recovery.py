@@ -1,5 +1,6 @@
 """HTTP断连、限流、连接释放及电源门控回归；全部使用本地模拟。"""
 import io
+from pathlib import Path
 import json
 import socket
 import tempfile
@@ -145,14 +146,14 @@ class TelemetryRecoveryTest(unittest.TestCase):
     def test_live_mode_failure_preserves_login_and_skips_power(self):
         host = PlatformHost("gpu-203", 1, 2, ("autodl-203-1",), (("autodl-203-1", 1, 2),))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output, \
-             patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-             patch("autodl_watcher.main.TelemetryApiCollector") as telemetry, \
-             patch("autodl_watcher.main.AvailabilityEvaluator.evaluate") as evaluate, \
-             patch("autodl_watcher.main.interactive_login") as login:
+             patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+             patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry, \
+             patch("autodl_watcher.monitor.AvailabilityEvaluator.evaluate") as evaluate, \
+             patch("autodl_watcher.monitor.interactive_login") as login:
             platform.return_value.collect.return_value = [host]
             platform.return_value.collect_occupancy.return_value = []
             telemetry.return_value.collect.side_effect = TelemetryUnavailable("Telemetry HTTP 冷却中；本轮未发送请求")
-            main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+            main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                   "--live", "--no-login", "--max-cycles", "1", "--runtime-dir", directory])
             self.assertIn("跳过开机，等待重试", output.getvalue())
             statuses = [json.loads(line[len(SESSION_PREFIX):])["status"] for line in output.getvalue().splitlines()

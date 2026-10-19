@@ -1,14 +1,14 @@
 """可验证的日志提取规则。仅解释字段路径和文本占位符，不执行模型代码。"""
 from __future__ import annotations
 
-import ast
 import json
 import math
 import re
+from .training_events import (ANSI_ESCAPE, METADATA, NUMBER, TIMESTAMP, dictionary,
+                              flat_metrics, generic_event, structured_event)
+from .yaml_settings import read_settings, settings_path, settings_source, write_settings
 
-NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 FIELDS = {"epoch", "total_epochs", "step", "total_steps", "pid", "dataset", "time"}
-STAMP = re.compile(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)?")
 
 
 class RuleError(ValueError):
@@ -36,17 +36,6 @@ def template_pattern(template):
     return re.compile("".join(parts))
 
 
-def dictionary(text):
-    try:
-        value = json.loads(text)
-    except ValueError:
-        try:
-            value = ast.literal_eval(text)
-        except (ValueError, SyntaxError):
-            return None
-    return value if isinstance(value, dict) else None
-
-
 def field(values, path):
     if path in values:  # 带斜线或点号的原指标名优先保持完整。
         return values[path]
@@ -56,17 +45,6 @@ def field(values, path):
             return None
         value = value[name]
     return value
-
-
-def numbers(values, prefix=""):
-    result = {}
-    for key, value in (values.items() if isinstance(values, dict) else ()):
-        name = prefix + str(key)
-        if isinstance(value, dict):
-            result.update(numbers(value, name + "/"))
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            result[name] = value
-    return result
 
 
 def extract(rule, line, pid=None):
@@ -99,11 +77,11 @@ def extract(rule, line, pid=None):
             event[name] = value + rule.get("epoch_offset", 0) if name == "epoch" else value
     if actual_pid is not None:
         event["pid"] = actual_pid
-    if "time" not in event and (stamp := STAMP.search(line)):
+    if "time" not in event and (stamp := TIMESTAMP.search(line)):
         event["time"] = stamp[0]
     if "dataset" not in event:
         event["dataset"] = rule.get("dataset", "validation")
-    metrics = numbers(field(values, rule["metrics_path"])) if rule.get("metrics_path") else {}
+    metrics = flat_metrics(field(values, rule["metrics_path"])) if rule.get("metrics_path") else {}  # 嵌套名称、布尔值及非有限值与默认解析保持一致。
     for name, path in rule.get("metrics", {}).items():
         value = field(values, path)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -149,7 +127,6 @@ def validate_profile(value, source, pid=None):
 
 def local_profile(source, pid=None):
     """AI空返回时，复用已识别事件生成字段规则；不猜测未知文本含义。"""
-    from .training import _generic_event, _structured_event, _METADATA
     rules = []
     for line in source.splitlines():
         start = line.find("{")
@@ -158,7 +135,7 @@ def local_profile(source, pid=None):
             continue
         if pid is not None and values.get("pid", pid) != pid:
             continue
-        event = _generic_event(line, _structured_event(line))
+        event = generic_event(line, structured_event(line))
         phase = event.get("phase", event.get("event"))
         if phase not in {"train", "test", "unknown"} or not event.get("metrics"):
             continue
@@ -178,13 +155,13 @@ def local_profile(source, pid=None):
                     paths(value, prefix + key + ".", label + key + "/")
                 elif isinstance(value, (int, float)) and not isinstance(value, bool):
                     name = label + key
-                    if not label and key in _METADATA:
+                    if not label and key in METADATA:
                         continue
                     display = name.removeprefix("metrics/")
                     if display in event["metrics"]:
                         metrics[display] = prefix + key
         paths(values)
-        prefix = STAMP.sub("", line[:start]).strip()
+        prefix = TIMESTAMP.sub("", line[:start]).strip()
         rule = {"format": "json", "contains": prefix.split()[-1] if prefix else "",
                 "where": {name: values[name] for name in ("status", "phase", "event") if isinstance(values.get(name), str)},
                 "phase": phase, "fields": fields, "metrics": dict(list(metrics.items())[:30]), "example": line}
@@ -205,7 +182,7 @@ def parse_rules(profile, text, pid, *, with_lines=False):
     events = []
     context_pid = None
     for index, line in enumerate(text.replace("\r", "\n").splitlines()):
-        line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
+        line = ANSI_ESCAPE.sub("", line)  # 保留输入行号，供主卡片按原位置合并规则结果。
         if len(line) > 16384:
             continue
         start = line.find("{")
@@ -230,10 +207,10 @@ def task_identity(server, task):
 
 class RuleStore:
     def __init__(self, path):
-        self.path = path
+        self.path = settings_path(path)
         self.error = ""
         try:
-            self.entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            self.entries = read_settings(self.path) if settings_source(self.path).exists() else {}
             if not isinstance(self.entries, dict):
                 raise ValueError()
         except (ValueError, OSError):
@@ -242,8 +219,5 @@ class RuleStore:
 
     def put(self, identity, entry):
         entries = {**self.entries, identity: entry}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(self.path)
+        write_settings(self.path, entries)
         self.entries = entries

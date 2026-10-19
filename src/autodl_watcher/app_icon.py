@@ -1,6 +1,5 @@
 """图标导入、Tk加载与用户入口分别处理；ICO原件不重新编码。"""
 from io import BytesIO
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +9,7 @@ from tkinter import filedialog, ttk
 import uuid
 
 from PIL import Image, ImageOps, ImageTk
+from .yaml_settings import read_settings, settings_source, write_settings
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
@@ -54,13 +54,13 @@ def save_shortcut(target, executable, icon):
 class IconManager:
     def __init__(self, root, folder):
         self.root, self.folder = root, folder
-        self.config = folder / "icon.json"
+        self.config = folder / "icon.yaml"
         self.photos, self.frames = [], []
         self.path, self.message = None, "使用系统默认图标"
         self.changed = False
         try:
-            if self.config.exists():
-                name = json.loads(self.config.read_text(encoding="utf-8")).get("file")
+            if settings_source(self.config).exists():
+                name = read_settings(self.config).get("file")
                 if name:
                     self.path = folder / name
                     _, frames, self.message = load_icon(self.path)
@@ -70,10 +70,10 @@ class IconManager:
             self.message = f"已保存图标无法加载，使用默认图标：{exc}"
         if not self.frames:
             self.apply(load_icon(Path(__file__).with_name("default.ico"))[1])
-        status = folder / "icon-executable-status.json"
+        status = folder / "icon-executable-status.yaml"
         try:
-            if status.exists():
-                self.message += "\n" + json.loads(status.read_text(encoding="utf-8"))["message"]
+            if settings_source(status).exists():
+                self.message += "\n" + read_settings(status)["message"]
         except (OSError, ValueError):
             self.message += "\nEXE图标同步记录无法读取；请检查目录实际图标。"
         self.root.bind_all("<Map>", self._mapped, add="+")
@@ -106,9 +106,7 @@ class IconManager:
         previous = self.frames
         try:
             self.apply(frames)
-            pending = self.config.with_suffix(".tmp")
-            pending.write_text(json.dumps({"file": destination.relative_to(self.folder).as_posix()}, ensure_ascii=False), encoding="utf-8")
-            pending.replace(self.config)
+            write_settings(self.config, {"file": destination.relative_to(self.folder).as_posix()})
         except (OSError, tk.TclError):
             if previous:
                 self.apply(previous)
@@ -122,7 +120,7 @@ class IconManager:
 
     def reset(self):
         self.folder.mkdir(parents=True, exist_ok=True)
-        self.config.write_text('{"file": null}', encoding="utf-8")
+        write_settings(self.config, {"file": None})
         self.apply(load_icon(Path(__file__).with_name("default.ico"))[1])
         self.path, self.message = None, "已恢复系统默认图标"
         self.changed = True

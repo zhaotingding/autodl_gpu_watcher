@@ -1,10 +1,34 @@
-# Auto算力与训练调度 v0.9.0.2
+# Auto算力与训练调度 v0.9.9
 
 监控 AutoDL 私有云入口空位、物理 GPU 显存和当前实例状态，可选开启满足条件后的自动开机；另以只读SSH查看自己的训练进度、训练/测试指标和日志错误。
 
+项目维护：[项目约定与技能索引](AGENTS.md) · [开发与协作](docs/开发与协作.md) · [项目文件与归档](docs/项目文件与归档.md) · [重构开发规范](重构开发规范.md)。
+
+## 克隆后快速启动
+
+完整桌面功能目前以 **Windows 10/11、Python 3.10 及以上**为支持环境；建议使用官方 Python 3.11，并安装其 Tcl/Tk 组件。无需作者的 Conda、绝对磁盘路径、API 密钥或服务器账号，即可打开应用并添加自己的服务器。Linux/macOS 的平台登录、凭据和图标未做完整实机验收。
+
+从本仓库页面复制克隆地址，进入克隆后的目录后执行：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m autodl_watcher
+```
+
+不需要激活虚拟环境。安装也会提供 `autodl-watcher` 桌面命令和 `autodl-watcher-monitor` CLI 命令。已有 wheel 可直接 `python -m pip install <wheel文件>`，之后从任意目录运行 `autodl-watcher`；`python -m autodl_watcher --version` 可确认当前安装版本。
+
+首次启动不会开启任何服务器、自动生成 AI 规则或发送付费请求。只做 SSH 训练监控时，点击“全局设置 → 服务器连接”添加自己的 SSH 别名即可；先在终端验证 `ssh <别名>` 可通过公钥无交互登录。AutoDL 平台监控另外需要系统 Microsoft Edge、自己的平台登录，以及兼容 GPU Telemetry 服务地址；没有这些资料时仍可打开应用、编辑配置和使用独立 SSH 页面。
+
+仓库 `config.yaml` 是不含私人实例和服务地址的安全示例。建议复制为被 Git 忽略的 `config.local.yaml` 后编辑；应用优先读取 local 文件，便于更新仓库时保留个人配置。`.ui/`、`runtime/`、`.env` 同样仅保留在本机，提交前请检查暂存内容。
+
+路径规则统一为：显式 `AUTODL_APP_ROOT` → EXE 所在目录或源码仓库 → wheel 安装时的用户资料目录（Windows 为 `%LOCALAPPDATA%/autodl-watcher`）。启动不依赖终端当前目录，也不会把 wheel 用户设置写进 `site-packages`。新资料目录缺少配置时从包内安全示例初始化，已有配置不会被覆盖。
+
+更多安装、调试、离线测试、wheel 验收与协作约定见 [开发与协作](docs/开发与协作.md)。
+
 ## 使用
 
-打开项目根目录的 `AutoDLWatcher.exe`。保留同目录的 `_internal/` 和 `config.yaml`；不需要安装 Python，需要系统 Microsoft Edge。迁移到另一台机器时使用干净包 `dist/AutoDLWatcher-v0.9.0.2.zip`，再自行登录。
+打开项目根目录的 `AutoDLWatcher.exe`。保留同目录的 `_internal/` 和 `config.yaml`；不需要安装 Python，需要系统 Microsoft Edge。迁移到另一台机器时使用干净包 `dist/AutoDLWatcher-v0.9.9.zip`，再自行登录。
 
 1. 启动后自动核验会话。登录失效时点击“登录 / 更新会话”，完成浏览器登录并关闭浏览器，再点击“已登录并关闭浏览器”。同步完成后仍需真实接口核验。
 2. 选择服务器入口，在“全局设置 → AutoDL监控”填写本人用户名和采样间隔（默认60秒，平台、显存与占用名单每轮一起刷新），点击“开始监控”。打开程序本身不会启动监控。
@@ -32,11 +56,11 @@
 
 HTTP 200响应中的明确登录超时同样会停止GUI监控并提示重新登录；超时、429、5xx等临时故障只跳过本轮开机并重试，不误判登录过期。
 
-v0.7.0已移除占用时长统计、SQLite历史写入、CSV导出和报表控件，只保留内存中的实时名单及开机前核验。旧占用历史文件不会再读取或更新；已有文件保留。诊断日志和连续采样状态仍在 `runtime/`。
+v0.7.0已移除占用时长统计、SQLite历史写入、CSV导出和报表控件，只保留内存中的实时名单及开机前核验。旧占用历史文件不会再读取或更新；2026-10-13 已移到本地归档，位置见[项目文件与归档](docs/项目文件与归档.md)。诊断日志和连续采样状态仍在 `runtime/`。
 
 ## 训练监控与其他服务器
 
-1. 在“全局设置 → 服务器连接”选择现有或未配置的入口，填写已有SSH别名、远端Python路径和可选项目目录；“添加服务器”会创建独立服务器页，例如4090。点击列表“训练SSH”列也会定位到同一全局设置窗口。连接配置只保存在本机 `.ui/servers.json`，不保存密码、不进入Git或发行包。监控期间可为任意入口新增或保存连接；编辑其他行不会切换当前平台监控入口。运行中修改显示“已存待用”，本轮继续使用原连接，下次启动这台服务器的训练监控时生效；不需要停止其他服务器。
+1. 在“全局设置 → 服务器连接”选择现有或未配置的入口，填写已有SSH别名、远端Python路径和可选项目目录；“添加服务器”会创建独立服务器页，例如4090。点击列表“训练SSH”列也会定位到同一全局设置窗口。连接配置只保存在本机 `.ui/servers.yaml`，不保存密码、不进入Git或发行包。监控期间可为任意入口新增或保存连接；编辑其他行不会切换当前平台监控入口。运行中修改显示“已存待用”，本轮继续使用原连接，下次启动这台服务器的训练监控时生效；不需要停止其他服务器。
 2. 使用Windows自带OpenSSH、已有密钥及已核验的主机记录。先在终端确保 `ssh 别名` 能登录；加密密钥需要可用的SSH代理。远端需要Linux `/proc` 和Python 3.7以上标准库；GPU信息还需 `nvidia-smi`。采集不会安装远端依赖、写脚本、修改训练或转发端口。
 3. 点“开始训练监控”可单独只读采集，无须启用AutoDL开机。AutoDL点“开始监控”时也会启动该入口已配置的训练采集，两者使用同一个采样间隔，默认60秒。独立服务器页各自启动，默认60秒；切换标签不会停止后台采集，关闭窗口等待当前请求退出。
 4. 默认发现当前SSH用户的 `train.py / trainer.py / train_*.py`，并结合tmux窗格进程树、训练日志或可核验GPU进程识别其他Python脚本及模块入口；继续受项目目录限制，自定义脚本列表保持严格筛选。通过已打开日志文件读取有限首尾。黑底GPU表另展示系统权限允许读取的其他GPU进程用户名、PID及脚本/配置名，不读取其他用户的训练日志、环境变量或完整命令行。脚本名支持`*`、`?`通配符，例如`train_*.py`覆盖`train_p03_t01.py`及后续同类入口；旧三脚本默认列表仅在读取时自动升级，自定义列表原样保留。可设置训练脚本名及项目目录以缩小范围；DataLoader子进程不会重复计作训练任务。只有终端输出、没有可读日志时，会显示进度不可读；tmux会话存在不代表训练仍在运行。训练原日志按钮只显示一个训练日志的最近原文，不拼接批次追踪；同一日志的新运行存活时，旧运行折叠至历史。
@@ -74,7 +98,7 @@ JSONL中的epoch按1开始，step为全局步数；每个事件一行并及时fl
 - PNG保留透明度和宽高比例，居中透明补边；16、20、24、32、40、48、64、128、256各档直接从原图生成。原图分辨率及帧尺寸显示在设置页，放大不会增加原文件细节。[Pillow ICO说明](https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#ico)
 - 窗口标题栏、运行中任务栏、快捷方式和磁盘EXE是不同图标来源。“另存启动快捷方式”生成带当前图标的 `.lnk`；之后更换图标需重新导出。旧固定入口可能使用旧图标，需要重新固定新快捷方式；同步后通知Windows刷新图标；不删除缓存文件、不改动已有任务栏固定项。
 - 磁盘EXE图标在安全关闭程序后由自有后台任务同步，保留程序归档与上一次EXE备份（`.ui/icon-executable-backup.exe`）；同步结果在下次启动的图标设置页显示。请关闭后稍候，再刷新目录或重新打开，旧窗口不会因此换成新版程序。开发打包也可指定：`python tools/build_exe.py --stage-only --icon "C:/path/icon.ico"`（也支持PNG）。验证暂存文件后关闭旧程序再替换；运行中只更新窗口图标，磁盘EXE等待GUI退出再写入。未选图标时使用默认图标。
-- 偏好在 `.ui/icon.json`，图标副本在 `.ui/icons/`，不依赖原始文件一直留在导入位置，不进入干净发行包。旧副本保留供已经导出的快捷方式引用。
+- 偏好在 `.ui/icon.yaml`，图标副本在 `.ui/icons/`，不依赖原始文件一直留在导入位置，不进入干净发行包。旧副本保留供已经导出的快捷方式引用。
 
 图标验证分原件、转换、Tk加载及系统显示四层。v0.9.0通过360项完整离线回归；真实打包worker在窗口退出后同步EXE，再打开候选EXE，窗口/Shell句柄像素均匹配。已安装版的用户配置图标在资源管理器大图标、标题栏和任务栏中实际显示。当前环境选择16px小帧与32px大帧；未做其它DPI实机验收。`WM_GETICON`为空时继续检查窗口类图标。[Windows官方说明](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-geticon)
 
@@ -85,10 +109,10 @@ JSONL中的epoch按1开始，step为全局步数；每个事件一行并及时fl
 “全局设置 → AI规则与消费”适用于 AutoDL、4090 和以后新增的所有服务器。服务器页不单独保存 API 凭据或模型配置。
 
 1. 填写 HTTPS API 基础地址、Responses 或 Chat Completions 协议、模型 ID、服务等级 `flex` / `default`（Standard）。默认选择 Flex，实际请求携带 `service_tier`；记录并展示服务端实际返回等级，未返回时明确标注。Flex 读取超时900秒，Standard 180秒，后台执行不阻塞监控。模型及接口须支持所选等级；失败继续本地监控，不自动重试或转为更贵等级。[Flex 官方说明](https://developers.openai.com/api/docs/guides/flex-processing)
-2. 密钥仍独立存入 Windows 凭据管理器 `autodl-watcher/llm/`，按完整 API 基础地址绑定；不导入消息萃取-MCP密钥。公开配置在 `.ui/ai.json`，不含密钥。保存后清空密钥输入框，“已保存”不代表调用验证成功。
+2. 密钥仍独立存入 Windows 凭据管理器 `autodl-watcher/llm/`，按完整 API 基础地址绑定；不导入消息萃取-MCP密钥。公开配置在 `.ui/ai.yaml`，不含密钥。保存后清空密钥输入框，“已保存”不代表调用验证成功。
 3. 勾选“新训练自动生成监控规则”并保存后，每个活动训练任务首次有可读日志时自动调用一次。此开关默认关闭，以免旧版用户升级后立即外发日志和产生费用。使用全局“监控提示词”中的可编辑提示词，把日志样例转换为字段映射和文本提取模板；固定JSON输出契约由程序附加。提示词可恢复默认，修改仅影响后续生成，不自动重做已有规则。各服务器按自身采样间隔执行本地规则（默认60秒），不重新调用AI、不增加SSH采样。
 4. 也可在任务卡片点击“生成 / 更新监控规则”，查看、删改待发送片段后手动生成并应用。自动/手动共用全应用唯一请求队列，配置按请求启动时取快照。片段最多12000字符，遮蔽常见密钥字段；自动模式会发送该范围日志，启用前应确认可外发。关闭窗口不能撤回已发请求。
-5. 规则及尝试记录存于 `.ui/training_rules.json`，按服务器连接、读取范围和进程启动身份绑定；重连/重开程序复用，同一PID的新运行不会串用。不同服务器共用全局API设置但不共用任务规则。失败、断流或程序关闭后的未完成请求不会自动再次发送，可手动更新。缓存损坏或无法保存时暂停自动请求并继续默认监控。
+5. 规则及尝试记录存于 `.ui/training_rules.yaml`，按服务器连接、读取范围和进程启动身份绑定；重连/重开程序复用，同一PID的新运行不会串用。不同服务器共用全局API设置但不共用任务规则。失败、断流或程序关闭后的未完成请求不会自动再次发送，可手动更新。缓存损坏或无法保存时暂停自动请求并继续默认监控。
 6. 规则只允许 JSON 字段路径及 `number/word/json` 文本占位符，不执行模型生成的 Shell/Python，不修改远端。规则必须提供真实日志样例并能提取到进度或指标；数值从每轮新日志提取，不保存AI摘要作为实时指标。按原日志记录顺序应用规则，统一沿用原行时间；未覆盖行继续默认解析，不因JSON内外时间差误拒绝，也不让旧匹配覆盖新进度。主卡片与生成窗口同步显示实际应用或回退状态；训练原日志保留。
 7. 日志格式变化导致不匹配时回退默认解析，手动更新规则。规则中的训练/测试阶段可驱动显示，但不能证明进程存活或整体成功；PID仍由SSH采集、错误仍由本地日志检测，规则不能清除已记录错误或参与开机决策。样例通过不保证模型语义理解正确。
 
@@ -105,34 +129,43 @@ JSONL中的epoch按1开始，step为全局步数；每个事件一行并及时fl
 
 2026-10-03已在203-1单独实施服务端防护：仅允许公钥认证，未认证等待20秒，每连接最多3次认证尝试；保留原MaxStartups限制。该配置不是监控程序启动时自动下发的功能，4090与后来添加的服务器不会被自动修改。已有会话和训练不受本次配置重载影响。
 
-迁移机器后，203的SSH也必须配置有效私钥或预先登记新公钥，平台账号登录不能替代SSH密钥。防护减少口令扫描造成的认证积压，不保证阻止公网连接洪泛；平台转发隐藏原始来源时，不应封禁容器看到的127.0.0.1。操作与回退位置记录在`Agent_MCP_Notes.md`。
+迁移机器后，203的SSH也必须配置有效私钥或预先登记新公钥，平台账号登录不能替代SSH密钥。防护减少口令扫描造成的认证积压，不保证阻止公网连接洪泛；平台转发隐藏原始来源时，不应封禁容器看到的127.0.0.1。这些历史部署只适用于当时已核验的服务器；回退方法与证据位置见[项目技能的训练与SSH参考](.agents/skills/autodl-maintenance/references/training-and-ai.md#ssh接入历史故障与回退线索)，执行前重新核验当前主机并取得相应授权。
 
 
 ## 配置与开机约束
 
-- `config.yaml` 中 `auto_start.targets` 保存真实实例ID与入口；实例重建后应更新ID。未配置实例的入口只能只读监控。
+- 个人 `config.local.yaml` 中 `auto_start.targets` 保存真实实例ID与入口；实例重建后应更新ID。未配置实例的入口只能只读监控。
 - `monitor.poll_seconds` 是唯一采样间隔，默认60秒；旧双间隔界面偏好迁移到60秒，以后保存的自定义值保持不变。`occupancy` 仅保留本人用户名和连续缺席确认参数，兼容旧 `usage_tracking` 中的这两项；旧占用间隔、数据库和统计开关不再使用。
 - 平台空位、物理显存、账号数量额度分别核验。无卡实例可能占用数量额度；不关闭有卡实例，不操作其他账号的实例。
 - 关机前及有卡启动前核验目标入口空闲INDEX与新鲜显存达标INDEX一致。电源请求响应不明时只查询、不盲目重发；接口受理不等于有卡运行。
 - 控制面请求默认直连；Telemetry沿用本机代理设置。每套浏览器资料同时只运行一个监控程序。
 - Telemetry正常时沿用采样间隔，每次采集最多2次HTTP请求；连续失败按60/120/240/300秒冷却，到期后的下一采样轮再试。429不立即重试，Retry-After可延长等待。断连清理本采集器连接池，健康连接继续复用；停止监控释放HTTP会话。失败/冷却均跳过开机，不将旧显存数据当作当前结果，也不误报SSH或登录失效。
 
-`runtime/`、`.ui/` 和 `.env` 属于本机资料，不纳入Git或发行包。更详细的API和验证约束见 `Agent_MCP_Notes.md`，历次变化见 `CHANGELOG.md`。
+`runtime/`、`.ui/` 和 `.env` 属于本机资料，不纳入Git或发行包。项目维护与验证边界见 [.agents/skills/autodl-maintenance/SKILL.md](.agents/skills/autodl-maintenance/SKILL.md)，历次变化见 `CHANGELOG.md`。
 
 ## 开发与验证
 
+Python 依赖统一声明在 `pyproject.toml`：只运行源码可安装 `python -m pip install -e .`，开发和 EXE 构建使用下方的 `.[build]`，其中构建工具保留固定版本。项目安装版本从源码 `autodl_watcher.__version__` 读取，与运行显示及 EXE 构建共用同一版本来源。
+
 ```powershell
-python -m pip install -e .
+python -m pip install -e ".[build]"
 python tools/gui_entry.py --debug
-python run_watcher.py --host 203 --entry 1 --dry-run
+python tools/run_watcher.py --host 203 --entry 1 --monitor-only
 python -m unittest discover -s tests -q
-python -m pip install PyInstaller==6.22.3
 python tools/build_exe.py --stage-only  # 验证暂存包，不替换运行版本
 python tools/build_exe.py               # 停止旧程序后更新根目录EXE
 ```
 
-入口调用顺序：`tools/gui_entry.py` → `gui.py` → `main.py` → 平台/Telemetry采集器 → `evaluator.py` → `autostart.py`。`state_store.py`仅保存连续采样状态。训练路径为 `gui.py` → `training_ui.py`（每台服务器单请求）→ `training.py`（SSH及进度判断）→ `remote_probe.py`（只读远端探针）；各服务器互不阻塞。
+入口统一由 `launcher.py` 组合；平台路径为 `gui.py` → worker / `main.py` → `monitor.py` → 平台/Telemetry采集器、`evaluator.py` 与 `autostart.py`。`state_store.py`仅保存连续采样状态。训练面板通过 `training_service.py` 的公开接口取得状态；服务组合 `training_connection.py`（SSH复用及只读探针）与 `training_tracker.py`（后台进度/错误跟踪），默认解析和专用规则共用 `training_events.py`。`settings_ui.py`拥有全局设置控件，`ai_service.py`拥有AI请求和用量收尾，各服务器按自身间隔运行。
 
 验证记录见 `CHANGELOG.md`。本版通过真实SSH只读采集203-1和4090，验证训练主进程去重、轮次/指标、独立分页与安全停止；OOM、退出不明、断连和长期无进展使用模拟回归，不人为中断训练制造故障。电源流程沿用原实现并做模拟回归，本版没有真实关机或开机操作。
 
-历史提交及版本标签说明按用户要求改为中文，代码树与作者、时间保持不变。改写前的完整历史保存在本机 `.tools/backups/v0.7.0-before/history.bundle`；远程历史尚未同步，不能直接普通推送覆盖。
+历史提交及版本标签说明按用户要求改为中文，代码树与作者、时间保持不变。改写前的完整历史保存在本机同级归档 `../autodl_gpu_watcher_archive/2026-10-13-before-refactor/files/.tools/backups/v0.7.0-before/history.bundle`；远程历史尚未同步，不能直接普通推送覆盖。
+
+### 配置与协作文件
+
+应用配置统一使用 YAML：根目录的公开示例 `config.yaml`、优先读取的本机 `config.local.yaml`，以及 `.ui/preferences.yaml`、`servers.yaml`、`ai.yaml`、`training_rules.yaml`、`icon.yaml` 和 `icon-executable-status.yaml`。旧 JSON 配置仅兼容读取；同名 YAML 优先，保存时原子写入 YAML。API 密钥仍在 Windows 凭据管理器，不写入配置文件。历史 JSON 配置在核对迁移内容后移出项目归档。
+
+工具要求的格式继续保留：Python 安装与构建配置 `pyproject.toml`、VS Code 的 `.vscode/settings.json`、Git 的 `.gitignore`。网络及进程间 JSON、JSONL 日志、SQLite 账本和 `runtime/state.json` 属于协议或运行数据，不是人工维护的应用配置。邮件环境变量示例见 [邮件通知配置](docs/邮件通知配置.md)，仍支持本机环境变量或 `.env`。
+
+命令行启动脚本位于 `tools/run_watcher.py`，桌面主入口仍为 `AutoDLWatcher.exe`。根目录 [AGENTS.md](AGENTS.md) 提供简短项目约束与技能索引；匹配任务时读取 [autodl-maintenance](.agents/skills/autodl-maintenance/SKILL.md)，再按需读取其references。旧Project_Skill.md和Agent_MCP_Notes.md入口已弃用，有效知识与历史证据定位已迁入项目技能。技能文件和引用已校验，新会话自动选用效果仍需从实际仓库目录确认。

@@ -1,10 +1,11 @@
+from training_helpers import wait_training
 from dataclasses import replace
 import queue
 import unittest
 from unittest.mock import patch
 
-from autodl_watcher.training import TrainingServer
-from autodl_watcher.training_ui import TrainingService
+from autodl_watcher.training_config import TrainingServer
+from autodl_watcher.training_service import TrainingService
 from test_training import snapshot
 
 
@@ -22,16 +23,16 @@ class PendingConnectionTest(unittest.TestCase):
         self.service.register(self.new)
         self.assertEqual(state["server"], self.old)
         self.assertEqual(state["pending"], self.new)
-        self.service.receive(("s", 0, snapshot(), ""))
+        self.service.receive(("s", 0, snapshot(), ""));wait_training(self.service)
         self.assertIsNotNone(state["snapshot"])
-        with patch("autodl_watcher.training_ui.threading.Thread") as thread, \
-             patch("autodl_watcher.training_ui.time.monotonic", return_value=state["due"]):
+        with patch("autodl_watcher.training_service.threading.Thread") as thread, \
+             patch("autodl_watcher.training_service.time.monotonic", return_value=state["due"]):
             self.service.tick()
             self.assertEqual(thread.call_args.kwargs["args"][-1].server, self.old)
         self.service.stop("s")
         with self.assertRaises(ValueError):
             self.service.start("s", 60)
-        self.service.receive(("s", 0, snapshot(), ""))
+        self.service.receive(("s", 0, snapshot(), ""));wait_training(self.service)
         self.service.start("s", 30)
         current = self.service.states["s"]
         self.assertEqual(current["server"], self.new)
@@ -39,7 +40,7 @@ class PendingConnectionTest(unittest.TestCase):
         self.assertIsNone(current["snapshot"])
         self.assertTrue(current["active"])
         self.assertEqual(current["interval"], 30)
-        with patch("autodl_watcher.training_ui.threading.Thread") as thread:
+        with patch("autodl_watcher.training_service.threading.Thread") as thread:
             self.service.tick()
             self.assertEqual(thread.call_args.kwargs["args"][-1].server, self.new)
 
@@ -63,7 +64,7 @@ class PendingConnectionTest(unittest.TestCase):
         state["busy"] = True
         self.service.stop("s")
         self.service.register(self.new)
-        self.service.receive(("s", 0, snapshot(), ""))
+        self.service.receive(("s", 0, snapshot(), ""));wait_training(self.service)
         self.assertIsNone(state["snapshot"])
         self.service.start("s", 60)
         self.assertEqual(self.service.states["s"]["server"], self.new)

@@ -4,7 +4,8 @@ import shutil
 import tempfile
 import unittest
 
-from autodl_watcher.training import TrainingServer, TrainingTracker
+from autodl_watcher.training_config import TrainingServer
+from autodl_watcher.training_tracker import TrainingTracker
 from autodl_watcher.training_ui import process_time
 from test_training import snapshot
 
@@ -44,10 +45,15 @@ class ProcessTimeTest(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt", "Windows EXE资源")
 class ExecutableIconTest(unittest.TestCase):
     def test_resource_update_keeps_program_archive_and_authored_frames(self):
-        from PyInstaller.archive.readers import CArchiveReader
+        root = Path(__file__).resolve().parents[1]
+        if not (root / "AutoDLWatcher.exe").is_file():
+            self.skipTest("尚未构建 Windows 成品；源码检出不要求自带 EXE")
+        try:
+            from PyInstaller.archive.readers import CArchiveReader
+        except ImportError:
+            self.skipTest("安装 build extra 后可验证 EXE 归档及图标")
         from autodl_watcher.exe_icon import replace_icon
         from test_app_icon import authored_icon, shell_icon
-        root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             exe = folder / "AutoDLWatcher.exe"

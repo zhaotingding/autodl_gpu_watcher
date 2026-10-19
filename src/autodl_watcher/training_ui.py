@@ -1,113 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-import threading
 import time
 import unicodedata
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
-from .training import TrainingTracker, TrainingConnection
-
-
-class TrainingService:  # 每台服务器最多一个只读请求；线程只投递结果，不接触Tk控件。
-    def __init__(self, events):
-        self.events = events
-        self.states = {}
-
-    def register(self, server):
-        state = self.states.get(server.id)
-        if state and (state["active"] or state["busy"]):
-            state["pending"] = server if server != state["server"] else None  # 只保存下次使用的连接，本轮SSH请求继续使用原配置。
-            return
-        if state:
-            state["connection"].close()
-        self.states[server.id] = dict(server=server, tracker=TrainingTracker(server, lambda task: self.rule_entry(server, task)), active=False, busy=False,
-                                      generation=(state["generation"] + 1 if state else 0), due=0, interval=60, snapshot=None, pending=None,
-                                      connection=TrainingConnection(server), failures=0)
-
-    def rule_entry(self, server, task):
-        if getattr(self, "ai", None):
-            from .training_rules import task_identity
-            identity = task_identity(server, task)
-            entry = self.ai.store.entries.get(identity)
-            if not entry and self.ai.store.error:
-                return {"message": "默认监控 · " + self.ai.store.error}
-            if entry and any(text in entry.get("message", "") for text in ("正在生成", "正在更新")) and self.ai.busy != identity:
-                return dict(entry, message="更新失败，保留原专用规则 · 上次规则请求未完成，可手动重试" if entry.get("profile")
-                            else "默认监控 · 上次规则请求未完成，可手动重试")
-            return entry
-        return None
-
-    def reparse(self, server_id):
-        state = self.states.get(server_id)
-        if state and state.get("snapshot"):
-            old = state["snapshot"]
-            state["snapshot"] = dict(state["tracker"].update(old), received_at=old["received_at"], error=old.get("error", ""))
-
-    def start(self, server_id, interval):
-        state = self.states[server_id]
-        if state["busy"] and not state["active"]:
-            raise ValueError("前一次采集尚未结束，请稍后再开始")
-        if state["active"]:
-            return
-        if state.get("pending"):
-            self.register(state["pending"])  # 已结束旧请求后才换连接、清空旧来源的快照。
-            state = self.states[server_id]
-        if any(other["active"] and other["server"].ssh_alias.casefold() == state["server"].ssh_alias.casefold()
-               for key, other in self.states.items() if key != server_id):
-            raise ValueError("此SSH连接已在另一服务器页面监控，请先停止那一页")
-        if state["connection"].closed:
-            state["connection"] = TrainingConnection(state["server"])
-        state.update(active=True, interval=interval, due=state["due"] if state["failures"] else 0)
-
-    def stop(self, server_id):
-        state = self.states[server_id]
-        state.update(active=False, generation=state["generation"] + 1)
-        state["connection"].close()
-
-    def tick(self):
-        if getattr(self, "ai", None):
-            self.ai.tick()
-        now = time.monotonic()
-        for server_id, state in self.states.items():
-            if state["active"] and not state["busy"] and now >= state["due"]:
-                state.update(busy=True, due=now + state["interval"])
-                threading.Thread(target=self._collect, args=(server_id, state["generation"], state["tracker"].previous(), state["connection"]), daemon=True).start()
-
-    def _collect(self, server_id, generation, previous, connection):
-        try:
-            result, error = connection.collect(previous), ""
-        except Exception as exc:
-            result, error = None, f"{type(exc).__name__}：{exc}"
-        self.events.put(("training", (server_id, generation, result, error)))
-
-    def receive(self, value):
-        server_id, generation, result, error = value
-        state = self.states[server_id]
-        state["busy"] = False
-        if generation != state["generation"]:
-            return  # 停止或改配置后的旧响应不能把界面重新变绿。
-        if not error:
-            try:
-                state["snapshot"] = state["tracker"].update(result)
-                state.update(failures=0, due=time.monotonic() + state["interval"])
-                return
-            except Exception as exc:
-                error = f"训练信息解析失败：{exc}"
-        state["failures"] += 1
-        delay = max(state["interval"], min(300, 60 * 2 ** min(state["failures"] - 1, 3)))
-        state["due"] = time.monotonic() + delay  # 单次失败只退避，不在采集线程内重拨。
-        old = state["snapshot"] or {"cards": [], "gpus": []}
-        state["snapshot"] = dict(old, error=f"{error}；{delay:g}秒后重试", received_at=time.time())  # 断连保留最近摘要并标黄，不能变成“无训练”。
-
-    def busy(self):
-        return any(state["busy"] for state in self.states.values())
-
-    def stop_all(self):
-        for key in self.states:
-            self.stop(key)
+from .cli import positive_seconds  # 与 CLI 共用间隔校验，视图无需导入监控入口。
 
 
 COLORS = {"success": ("#10372a", "#8bf0ad"), "error": ("#481f26", "#ff9ca8"),
@@ -246,7 +146,6 @@ class TrainingPane(ttk.Frame):
             self.configure_server()
             return
         try:
-            from .main import positive_seconds
             self.service.start(self.server_id, positive_seconds(str(self.interval())))
             self.service.tick()
             self.render()
@@ -259,32 +158,35 @@ class TrainingPane(ttk.Frame):
             self.render()
 
     def render(self):
-        state = self.service.states.get(self.server_id)
-        snapshot = state["snapshot"] if state else None
+        state = self.service.status(self.server_id) if self.server_id is not None else None  # 只读取服务公开的轻量状态。
+        snapshot = self.service.snapshot(self.server_id) if state else None  # 保留快照对象身份，避免无数据变化时重建卡片。
+        server = self.service.server(self.server_id) if state else None  # 活动配置与待生效配置由服务区分。
+        closing = bool(state and state["closing"])  # 停止状态与计数来自同一次状态读取。
         expired = bool(snapshot and time.time() - snapshot["received_at"] > max(90, state["interval"] * 2))
-        key = (self.server_id, state["active"] if state else False, state["busy"] if state else False,
-               snapshot["received_at"] if snapshot else None, expired, state.get("pending") if state else None,
-               state["generation"] if state else None, getattr(self, "show_history", False),
-               self.service.ai.revision if getattr(self.service, "ai", None) else 0)
+        # 请求在途和其他服务器的 AI 变化不改变本页卡片；只更新按钮状态。
+        self.start_button.configure(state="disabled" if state and (state["active"] or state["busy"] or closing) else "normal")
+        self.stop_button.configure(state="normal" if state and state["active"] else "disabled")
+        key = (self.server_id, state["active"] if state else False, closing,
+               id(snapshot), expired, state.get("pending") if state else None,
+               state["generation"] if state else None, getattr(self, "show_history", False))
         if key == self.render_key:
             return
         self.render_key = key
-        self.start_button.configure(state="disabled" if state and (state["active"] or state["busy"]) else "normal")
-        self.stop_button.configure(state="normal" if state and state["active"] else "disabled")
         warning = (snapshot.get("error", "") if snapshot else "") or ("采样已过期" if expired else "")
         if not state:
             text = "此入口尚未配置SSH训练连接；平台监控仍可使用。"
+        elif closing:
+            text = "正在停止训练采集，回收本程序的SSH连接；下面保留最近结果。"
         elif not state["active"]:
             text = "训练采集已停止，下面保留最近结果。" if snapshot else "尚未开始训练监控（只读）"
         elif warning:
             text = warning
         elif snapshot:
-            text = f"{state['server'].name} · SSH用户 {snapshot.get('user', '—')} · 最近采集 {datetime.fromtimestamp(snapshot['received_at']):%H:%M:%S}"
+            text = f"{server.name} · SSH用户 {snapshot.get('user', '—')} · 最近采集 {datetime.fromtimestamp(snapshot['received_at']):%H:%M:%S}"
         else:
             text = "正在连接，读取本人训练进程与日志…"
         if state and state["active"]:
-            connection = state["connection"]
-            text += f" · 采集{connection.samples}次 / 连接尝试{connection.attempts}次"
+            text += f" · 采集{state['samples']}次 / 连接尝试{state['attempts']}次"  # 显示连接计数，不持有连接对象。
         if state and state.get("pending"):
             text += " · 新连接已保存，下次启动训练监控生效"
         self.summary.configure(text=text, foreground="#9a6700" if warning else "#245c45")
@@ -295,7 +197,7 @@ class TrainingPane(ttk.Frame):
             log_key = (snapshot["received_at"], warning)
             if log_key != self.gpu_log_key:
                 self.gpu_log_key = log_key
-                text = f"[{datetime.now():%H:%M:%S}] {warning}；上次数据不作为当前状态。\n" if warning else gpu_table(snapshot, state["server"].name)
+                text = f"[{datetime.now():%H:%M:%S}] {warning}；上次数据不作为当前状态。\n" if warning else gpu_table(snapshot, server.name)
                 self.gpu_log.configure(state="normal")
                 self.gpu_log.insert("end", text, "warning" if warning else "normal")
                 if int(self.gpu_log.index("end-1c").split(".")[0]) > 1000:
@@ -307,7 +209,7 @@ class TrainingPane(ttk.Frame):
             frame = self._card("warning" if warning else "idle")
             self._label(frame, "无法确认训练状态" if warning else "无匹配训练进程" if snapshot and state["active"] else "等待训练采集", bold=True)
             if snapshot and state["active"] and not warning:
-                self._label(frame, f"脚本匹配：{state['server'].scripts} · 目录：{state['server'].project or '当前SSH用户'}；可在全局设置中修改。")
+                self._label(frame, f"脚本匹配：{server.scripts} · 目录：{server.project or '当前SSH用户'}；可在全局设置中修改。")
         history_count = sum(bool(card.get("history")) for card in cards)
         if history_count:
             def toggle_history():
@@ -370,12 +272,12 @@ class TrainingPane(ttk.Frame):
         window.title(f"{card['name']} · PID {card['pid']} · 训练原日志")
         window.geometry("780x440")
         ttk.Label(window, text=card.get("log_path") or "未找到训练日志", wraplength=740).pack(anchor="w", padx=8, pady=4)
-        ttk.Label(window, text="最近采样的原文片段；长日志显示末尾64 KiB，可横向滚动。").pack(anchor="w", padx=8)
+        ttk.Label(window, text=card.get("details_note") or "最近采样的原文片段；长日志显示末尾64 KiB，可横向滚动。", wraplength=740).pack(anchor="w", padx=8)
         horizontal = ttk.Scrollbar(window, orient="horizontal")
         horizontal.pack(side="bottom", fill="x")
         text = ScrolledText(window, wrap="none", font=("Consolas", 10), xscrollcommand=horizontal.set)
         horizontal.configure(command=text.xview)
         text.pack(fill="both", expand=True)
-        text.insert("end", card.get("details") or "没有可读取的日志")
+        text.insert("end", card.get("details") or card.get("details_note") or "没有可读取的日志")
         text.see("end")
         text.configure(state="disabled")

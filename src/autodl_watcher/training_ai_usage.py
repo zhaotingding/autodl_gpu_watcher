@@ -97,22 +97,43 @@ class UsageStore:
         with closing(sqlite3.connect(self.path)) as db, db:
             return [json.loads(row[0]) for row in db.execute("SELECT record FROM calls ORDER BY time DESC")]
 
+    @staticmethod
+    def _totals(db, where="", args=()):
+        # SQLite 聚合原始账本，Python 仅取一行；历史明细不再全部解码到内存。
+        fields = ["count(*)", "coalesce(sum(json_extract(record, '$.cny') IS NULL), 0)",
+                  "coalesce(sum(json_extract(record, '$.cny')), 0)"]
+        for field in ("input", "output", "cached", "write"):
+            path = "$.tokens." + field
+            fields += [f"coalesce(sum(json_extract(record, '{path}')), 0)",
+                       f"coalesce(sum(json_extract(record, '{path}') IS NULL), 0)"]
+        return db.execute("SELECT " + ", ".join(fields) + " FROM calls " + where, args).fetchone()
+
     def summary(self):
-        records = self.records()
-        today = datetime.now(timezone(timedelta(hours=8))).date()
+        zone = timezone(timedelta(hours=8))
+        today = datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        records, totals, daily = [], (0,) * 11, (0,) * 11
+        if self.path.exists():
+            with closing(sqlite3.connect(self.path)) as db, db:
+                db.execute("BEGIN")  # 明细与汇总共用同一读快照，不混入进行中的记账。
+                records = [json.loads(row[0]) for row in db.execute("SELECT record FROM calls ORDER BY time DESC LIMIT 50")]
+                totals = self._totals(db)
+                daily = self._totals(db, "WHERE time >= ? AND time < ?", (today, today + 86400))
+        latest = records[:1]
+        recent = [len(latest), sum(r.get("cny") is None for r in latest), sum(r.get("cny") or 0 for r in latest)]
+        for field in ("input", "output", "cached", "write"):
+            recent.extend((sum(r["tokens"][field] or 0 for r in latest), sum(r["tokens"][field] is None for r in latest)))
         lines = ["Token 与估计消费 · 所有服务器共用", "历史未记录调用无法补算；金额仅为估计，以服务商账单为准。"]
-        for name, selected in (("最近一次", records[:1]), ("今日（UTC+8）", [r for r in records if datetime.fromtimestamp(r["time"], timezone(timedelta(hours=8))).date() == today]), ("累计", records)):
-            missing = sum(r.get("cny") is None for r in selected)
+        for name, selected in (("最近一次", recent), ("今日（UTC+8）", daily), ("累计", totals)):
+            count, missing, cost, *usage = selected
             token_totals = []
-            for field, label in (("input", "输入"), ("output", "输出"), ("cached", "缓存命中"), ("write", "写入")):
-                values = [r["tokens"][field] for r in selected]
-                unknown = sum(v is None for v in values)
-                token_totals.append(f"{label} {sum(v for v in values if v is not None):,}" + (f"（{unknown}笔未知）" if unknown else ""))
-            lines.append(f"\n{name}：{len(selected)}次请求 · " + " · ".join(token_totals))
-            lines.append(f"已知费用估计 ¥{sum(r.get('cny') or 0 for r in selected):.6f}" + (f"；另有{missing}笔费用未知" if missing else ""))
+            for index, label in enumerate(("输入", "输出", "缓存命中", "写入")):
+                value, unknown = usage[index * 2:index * 2 + 2]
+                token_totals.append(f"{label} {value:,}" + (f"（{unknown}笔未知）" if unknown else ""))
+            lines.append(f"\n{name}：{count}次请求 · " + " · ".join(token_totals))
+            lines.append(f"已知费用估计 ¥{cost:.6f}" + (f"；另有{missing}笔费用未知" if missing else ""))
         lines.append("\n最近调用（最多50条）：")
-        for call in records[:50]:
-            stamp = datetime.fromtimestamp(call["time"]).strftime("%m-%d %H:%M:%S")
+        for call in records:
+            stamp = datetime.fromtimestamp(call["time"], zone).strftime("%m-%d %H:%M:%S")
             lines.append(f"\n{stamp} · {call['model']} · 实际模型 {call.get('actual_model') or '未返回'} · 请求 {call['requested_tier']} / 实际 {call.get('actual_tier') or '未返回'} · {call['status']}")
             lines.append(call_text(call))
         return "\n".join(lines)

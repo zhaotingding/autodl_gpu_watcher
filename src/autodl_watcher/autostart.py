@@ -299,30 +299,21 @@ class AutoStartCoordinator:  # 自动开机协调器。
             if status != "shutdown":  # 已有卡运行、正在开关机或未知状态都不重复开机。
                 return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
                                           target.machine_name, f"实例当前状态为 {status}/{mode}，暂缓有卡开机。")
-        else:
-            try:
-                state = self.platform.get_instance_state(target.instance_uuid, target.machine_name)  # 普通开机也须核实配置 UUID、入口及本账号同主机占用。
-            except PlatformAuthenticationError:
-                raise
-            except Exception as exc:
-                return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
-                                          target.machine_name, f"实例列表无法核对目标：{exc}")
-            if (not isinstance(state, dict) or state.get("status") != "shutdown"
-                    or state.get("host_account_gpu_clear") is not True):
-                return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
-                                          target.machine_name, "目标实例未确认已关机，或同主机账号有卡占用尚未排除，暂缓开机。")
 
-        if self.convert_no_gpu:
-            try:
-                state = self.platform.get_instance_state(target.instance_uuid, target.machine_name)  # 全部额度释放与容量复核后，最后确认原 UUID 仍关机、同主机无账号有卡占用。
-            except PlatformAuthenticationError:
-                raise
-            except Exception as exc:
-                return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
-                                          target.machine_name, f"开机前最终实例状态无法核对：{exc}")
-            if state.get("status") != "shutdown" or state.get("host_account_gpu_clear") is not True:
-                return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
-                                          target.machine_name, "开机前目标状态或同主机账号占用已变化，未发送有卡开机。")
+        try:
+            state = self.platform.get_instance_state(target.instance_uuid, target.machine_name)  # 统一最终核验；转换模式仍在释放额度后重新读取，不复用前置状态。
+        except PlatformAuthenticationError:
+            raise  # 登录失效交回主循环恢复，不能归为普通状态阻断。
+        except Exception as exc:
+            message = "开机前最终实例状态无法核对" if self.convert_no_gpu else "实例列表无法核对目标"
+            return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
+                                      target.machine_name, f"{message}：{exc}")
+        if (not isinstance(state, dict) or state.get("status") != "shutdown"
+                or state.get("host_account_gpu_clear") is not True):  # 只有已关机且同主机账号有卡占用已排除，才允许发请求。
+            message = ("开机前目标状态或同主机账号占用已变化，未发送有卡开机。" if self.convert_no_gpu
+                       else "目标实例未确认已关机，或同主机账号有卡占用尚未排除，暂缓开机。")
+            return StartAttemptResult("instance_state_blocked", alert.host, target.instance_uuid,
+                                      target.machine_name, message)
         if stop_requested():
             return StartAttemptResult("cancelled", alert.host, target.instance_uuid, target.machine_name, "监控已请求停止。")
         if self.convert_no_gpu:
@@ -376,11 +367,7 @@ class AutoStartCoordinator:  # 自动开机协调器。
                 platform_total_after = None
 
         if self.convert_no_gpu:
-            self.pending_switch = None  # 已明确受理后由主循环占用确认接管，不能留下切换锁阻止后续重新武装。
-            self._pending_alert = None
-            self._switch_power_on_sent = False
-            self._switch_shutdown_sent = False
-            self._released_no_gpu.clear()
+            self._finish_switch()  # 明确受理后由主循环占用确认接管，不能留下旧切换锁。
         return StartAttemptResult(
             status="request_accepted",  # 主循环随后等待实时占用确认，并在宽限期内抑制重复开机。
             host=alert.host,
@@ -394,6 +381,13 @@ class AutoStartCoordinator:  # 自动开机协调器。
             platform_free_after=platform_free_after,
             platform_total_after=platform_total_after,
         )
+
+    def _finish_switch(self) -> None:  # 已受理或已观测到有卡运行时，统一释放本次切换状态。
+        self.pending_switch = None  # 解除原实例锁，允许后续新的调度。
+        self._pending_alert = None  # 旧空闲事件不再用于继续切换。
+        self._switch_power_on_sent = False  # 仅成功收尾后清除本次开机请求标记。
+        self._switch_shutdown_sent = False  # 与原目标关机请求同步清理。
+        self._released_no_gpu.clear()  # 完成切换后不把其它实例的释放记录带入下一次。
 
     def _release_other_no_gpu(self, target: AutoStartTarget, alert: AvailabilityAlert,
                               target_state: dict, stop_requested: Callable[[], bool]) -> StartAttemptResult | None:  # 先释放同账号其它入口，完整关机后才允许原目标继续。
@@ -476,11 +470,7 @@ class AutoStartCoordinator:  # 自动开机协调器。
             return StartAttemptResult("gpu_start_pending", alert.host, target.instance_uuid,
                                       target.machine_name, "同一实例正在有卡启动，尚未确认运行或占用。")
         if status == "running" and mode == "gpu":
-            self.pending_switch = None  # 同一实例已由平台或人工进入有卡启动，结束本次切换。
-            self._pending_alert = None
-            self._switch_power_on_sent = False
-            self._switch_shutdown_sent = False
-            self._released_no_gpu.clear()
+            self._finish_switch()  # 同一实例已由平台或人工进入有卡运行，结束本次切换。
             return StartAttemptResult("gpu_start_observed", alert.host, target.instance_uuid,
                                       target.machine_name, "同一实例已进入有卡启动，等待占用确认。")
         if status != "shutdown" and not (status == "running" and mode == "non_gpu" and not self._switch_shutdown_sent):
@@ -491,11 +481,7 @@ class AutoStartCoordinator:  # 自动开机协调器。
                                       target.machine_name, "有卡开机响应未确认；等待状态变化或人工核查。")
         result = self.attempt(alert, stop_requested, target_override=target)  # 再次核对空位和显存，不允许换到另一实例。
         if result.status == "request_accepted":
-            self.pending_switch = None
-            self._pending_alert = None
-            self._switch_power_on_sent = False
-            self._switch_shutdown_sent = False
-            self._released_no_gpu.clear()
+            self._finish_switch()  # 与直接开机的成功路径共用同一收尾。
         return result
 
 

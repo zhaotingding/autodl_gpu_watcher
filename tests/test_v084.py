@@ -1,3 +1,4 @@
+from training_helpers import wait_training
 import queue
 import sys
 import threading
@@ -6,8 +7,9 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from autodl_watcher.training import TrainingServer, TrainingConnection
-from autodl_watcher.training_ui import TrainingService
+from autodl_watcher.training_config import TrainingServer
+from autodl_watcher.training_connection import TrainingConnection
+from autodl_watcher.training_service import TrainingService
 from test_training import snapshot
 
 
@@ -31,8 +33,8 @@ class PersistentSSHTest(unittest.TestCase):
         self.addCleanup(self.connection.close)
 
     def test_missing_probe_does_not_leave_an_authenticated_idle_process(self):
-        with patch('autodl_watcher.training.Path.read_text',side_effect=FileNotFoundError('probe')), \
-             patch('autodl_watcher.training.subprocess.Popen') as spawn:
+        with patch('autodl_watcher.training_connection.Path.read_text',side_effect=FileNotFoundError('probe')), \
+             patch('autodl_watcher.training_connection.subprocess.Popen') as spawn:
             with self.assertRaises(FileNotFoundError):self.connection.collect()
         self.assertFalse(spawn.called)
         self.assertEqual(self.connection.attempts,0)
@@ -110,17 +112,17 @@ class BackoffTest(unittest.TestCase):
 
     def test_backoff_grows_caps_and_does_not_overlap_or_restart_early(self):
         state=self.service.states['s']
-        with patch('autodl_watcher.training_ui.time.monotonic',return_value=1000):
+        with patch('autodl_watcher.training_service.time.monotonic',return_value=1000):
             for delay in (60,120,240,300,300):
                 self.service.receive(('s',0,None,'SSH接入被限流：MaxStartups'))
                 self.assertEqual(state['due'],1000+delay)
             self.service.stop('s');self.service.start('s',60)
-            with patch('autodl_watcher.training_ui.threading.Thread') as thread:
+            with patch('autodl_watcher.training_service.threading.Thread') as thread:
                 self.service.tick();self.assertFalse(thread.called)
-        with patch('autodl_watcher.training_ui.time.monotonic',return_value=1300),patch('autodl_watcher.training_ui.threading.Thread') as thread:
+        with patch('autodl_watcher.training_service.time.monotonic',return_value=1300),patch('autodl_watcher.training_service.threading.Thread') as thread:
             self.service.tick();self.service.tick();self.assertEqual(thread.call_count,1)
-        with patch('autodl_watcher.training_ui.time.monotonic',return_value=1301):
-            self.service.receive(('s',state['generation'],snapshot(),''))
+        with patch('autodl_watcher.training_service.time.monotonic',return_value=1301):
+            self.service.receive(('s',state['generation'],snapshot(),''));wait_training(self.service)
             self.assertEqual(state['failures'],0);self.assertEqual(state['due'],1361)
 
     def test_same_ssh_alias_cannot_run_in_two_pages(self):
@@ -130,7 +132,7 @@ class BackoffTest(unittest.TestCase):
 
     def test_interval_above_backoff_cap_is_respected(self):
         self.service.stop('s');self.service.start('s',600)
-        with patch('autodl_watcher.training_ui.time.monotonic',return_value=10):
+        with patch('autodl_watcher.training_service.time.monotonic',return_value=10):
             self.service.receive(('s',1,None,'timeout'))
             self.assertEqual(self.service.states['s']['due'],610)
 

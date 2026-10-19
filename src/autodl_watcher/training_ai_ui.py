@@ -8,28 +8,18 @@ from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import ai_credentials
-from .training_ai import DEFAULT_PROMPT, DEFAULTS, AnalysisError, analyze, excerpt, load_settings, save_settings, settings
-from .training_rules import RuleError, RuleStore, task_identity
+from .training_ai import DEFAULT_PROMPT, DEFAULTS, analyze, excerpt, load_settings, save_settings
+from .ai_service import AIService
 from .training_ai_usage import UsageStore, call_text, LUNA_PRICES, pricing_settings
 
 
-class AIAssistant:
-    """一个应用共享配置及请求队列，规则按服务器和进程身份独立缓存。"""
+class AIAssistant(AIService):
+    """Tk 入口只负责视图与服务器 ID 映射，付费请求和保存由 AIService 拥有。"""
     def __init__(self, root, path, service):
-        self.root, self.path, self.service = root, path, service
-        self.store = RuleStore(path.with_name("training_rules.json"))
-        self.usage = UsageStore(path.with_name("ai_usage.sqlite3"))
-        self.results = queue.Queue()
-        self.busy = None
-        self.revision = 0
-        self.reload()
-
-    def reload(self):
-        try:
-            self.config = load_settings(self.path)
-        except (OSError, ValueError):
-            self.config = {**DEFAULTS, "auto_generate": False}
-        self.revision += 1
+        self.root, self.service = root, service
+        # 保留界面模块的 analyze 导入入口，已有集成和模拟调用仍可替换它。
+        super().__init__(path, analyzer=lambda config, source, pid, control=None:
+                         analyze(config, source, pid, control=control))
 
     def configure(self):
         return self.open_settings("ai")
@@ -38,11 +28,10 @@ class AIAssistant:
         return AnalysisWindow(self.root, self, server_id, card)
 
     def entry(self, server_id, card):
-        server = self.service.states[server_id]["server"]
-        return self.store.entries.get(task_identity(server, card), {})
+        return self.rule_entry(self.service.server(server_id), card)
 
     def application_status(self, server_id, card):
-        snapshot = self.service.states.get(server_id, {}).get("snapshot") or {}
+        snapshot = self.service.snapshot(server_id) or {}
         current = next((item for item in snapshot.get("cards", []) if item["key"] == card["key"]), None)
         if not current:
             return "主卡片暂无此任务样本；等待下次采样验证"
@@ -50,73 +39,19 @@ class AIAssistant:
         return "主卡片：" + current.get("rule_status", "默认监控") + suffix
 
     def generate(self, server_id, card, source, config=None):
-        if self.busy:
-            raise AnalysisError("已有 AI 请求进行中；继续默认监控，不会重复发送")
-        config = settings(config or self.config)
-        source = excerpt(source)
-        if not source.strip() or not card.get("log_path"):
-            raise AnalysisError("没有可读日志；继续默认监控")
-        server = self.service.states[server_id]["server"]
-        identity = task_identity(server, card)
-        # 请求前落盘，防止断流/重启后把同一个付费请求再次自动发送。
-        entry = dict(self.store.entries.get(identity, {}))
-        if entry.get("log_path") != card["log_path"]:
-            entry.pop("profile", None)
-        entry.update(message="正在更新专用规则" if entry.get("profile") else "默认监控 · 正在生成专用规则",
-                     attempted=True, log_path=card["log_path"])
-        self.store.put(identity, entry)
-        self.busy = identity
-        self.revision += 1
+        identity = super().generate(self.service.server(server_id), card, source, config)
         self.service.reparse(server_id)
-        threading.Thread(target=self._run, args=(identity, server_id, card["pid"], config, source), daemon=True).start()
         return identity
 
-    def _run(self, identity, server_id, pid, config, source):
-        try:
-            value, error = analyze(config, source, pid), ""
-        except Exception as exc:
-            value = {"call": exc.call} if getattr(exc, "call", None) else None
-            error = str(exc) if isinstance(exc, (AnalysisError, RuleError, ai_credentials.CredentialError)) else "AI 规则生成失败"
-        if value and value.get("call"):
-            try:
-                self.usage.record(value["call"])
-            except (OSError, sqlite3.Error):
-                value["usage_warning"] = "用量账本保存失败，本次用量仅随任务结果保存"
-        self.results.put((identity, server_id, value, error))
-
     def poll(self):
-        try:
-            identity, server_id, value, error = self.results.get_nowait()
-        except queue.Empty:
-            return
-        self.busy = None
-        entry = dict(self.store.entries[identity])
-        if error:
-            entry["message"] = ("更新失败，保留原专用规则 · " + error.replace("继续默认监控，", "").replace("；继续默认监控", "")
-                                if entry.get("profile") else "默认监控 · " + error)
-        else:
-            entry["message"] = value.get("generation_note", "专用规则已生成")
-        if value:
-            if value.get("rule_origin") == "local" and entry.get("profile"):
-                entry["message"] = "更新失败，AI返回空规则；保留原专用规则，未自动重试"
-                value = {key: item for key, item in value.items() if key not in {"profile", "rule_origin", "generation_note"}}
-            entry.update(value)
-        try:
-            self.store.put(identity, entry)
-        except OSError:
-            entry = dict(self.store.entries[identity], attempted=True, message="规则保存失败，保留原监控；请检查本地目录")
-            self.store.entries[identity] = entry
-        self.revision += 1
-        self.service.reparse(server_id)  # 仅重解析最近样本；不发SSH，不伪造新的采集时间。
+        for server_id in super().poll():
+            self.service.reparse(server_id)  # 最近样本本地重解析，不发起新的 SSH 采样。
 
     def tick(self):
         self.poll()
-        if self.busy or not self.config.get("auto_generate") or self.store.error or not self.config.get("model"):
+        if self.closing or self.busy or not self.config.get("auto_generate") or self.store.error or not self.config.get("model"):
             return
-        for server_id, state in self.service.states.items():
-            snapshot = state.get("snapshot")
-            if not state["active"] or not snapshot or snapshot.get("error"):
-                continue
+        for server_id, snapshot in self.service.monitored_snapshots():
             for card in snapshot.get("cards", []):
                 if not card.get("alive") or not card.get("details") or self.entry(server_id, card):
                     continue
@@ -191,6 +126,8 @@ class AISettings(ttk.Frame):
         ttk.Button(pricing, text="填入 gpt-6-luna 官方案例价", command=self.preset_prices).grid(row=7, column=0, columnspan=2, pady=8, sticky="w")
         ttk.Label(pricing, text="案例：2026-10-07 官方标准价，Flex 0.5倍，汇率7.0仅为估计。\n其它模型或第三方接口请填写自己的单价；留空则费用显示未知。\n缓存明细未返回时暂按0估算并标注，账单可能不同。", wraplength=620).grid(row=8, column=0, columnspan=2, sticky="w")
         self.usage = UsageStore(path.with_name("ai_usage.sqlite3"))
+        self._usage_results, self._usage_timer, self._usage_pending = queue.Queue(), None, False
+        self.bind("<Destroy>", self._destroyed)
         self.usage_text = ScrolledText(usage, wrap="word", state="disabled", font=("Microsoft YaHei UI", 9))
         self.usage_text.pack(fill="both", expand=True)
         ttk.Button(usage, text="刷新用量", command=self.refresh_usage).pack(anchor="e", pady=8)
@@ -214,14 +151,42 @@ class AISettings(ttk.Frame):
         self.price_scope = ("https://api.openai.com/v1", "gpt-6-luna")
 
     def refresh_usage(self):
+        if self._usage_pending:
+            return
+        self._usage_pending = True
+        self._show_usage("正在读取用量账本…")
+        threading.Thread(target=self._read_usage, args=(self.usage, self._usage_results),
+                         name="ai-usage-summary", daemon=True).start()  # 只传账本与队列，后台不持有 Tk 窗口。
+        self._usage_timer = self.after(25, self._poll_usage)
+
+    @staticmethod
+    def _read_usage(usage, results):  # 静态任务不延长控件生命周期；窗口关闭后仍可完成本次只读汇总。
         try:
-            text = self.usage.summary()
+            text = usage.summary()  # SQLite 聚合在后台执行，不阻塞 Tk 事件循环。
         except (OSError, ValueError, sqlite3.Error):
             text = "用量账本无法读取；费用未知。"
+        results.put(text)  # 后台只交付文本，不接触 Tk 控件。
+
+    def _poll_usage(self):
+        self._usage_timer = None
+        try:
+            text = self._usage_results.get_nowait()
+        except queue.Empty:
+            self._usage_timer = self.after(25, self._poll_usage)
+            return
+        self._usage_pending = False
+        self._show_usage(text)
+
+    def _show_usage(self, text):
         self.usage_text.configure(state="normal")
         self.usage_text.delete("1.0", "end")
         self.usage_text.insert("1.0", text)
         self.usage_text.configure(state="disabled")
+
+    def _destroyed(self, event):
+        if event.widget is self and self._usage_timer is not None:
+            self.after_cancel(self._usage_timer)
+            self._usage_timer = None
 
     def show_credential(self):
         try:

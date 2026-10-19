@@ -1,3 +1,4 @@
+from training_helpers import wait_training
 import copy
 import json
 import queue
@@ -8,10 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autodl_watcher.remote_probe import training_roots
-from autodl_watcher.training import DEFAULT_SCRIPTS, TrainingServer
+from autodl_watcher.training_config import DEFAULT_SCRIPTS, TrainingServer
 from autodl_watcher.training_ai import analyze, decode_result
 from autodl_watcher.training_ai_ui import AIAssistant
-from autodl_watcher.training_ui import TrainingService
+from autodl_watcher.training_service import TrainingService
 from test_training import snapshot
 from test_training_ai import CONFIG
 
@@ -61,7 +62,7 @@ class TrainingLauncherTest(unittest.TestCase):
             'fields':{'pid':'pid','epoch':'epoch','step':'steps'},
             'metrics':{'Loss':'loss','辅助损失':'aux_loss'},'example':line}]}
         with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'ai.json';path.write_text(json.dumps(CONFIG),encoding='utf-8')
+            path=Path(folder)/'ai.yaml';path.write_text(json.dumps(CONFIG),encoding='utf-8')
             service=TrainingService(queue.Queue());server=TrainingServer('ssh-4090','4090','host')
             service.register(server);ai=AIAssistant(None,path,service);service.ai=ai
             value=snapshot(line);value['tasks'][0].update(pid=2,key='boot:2:100',name='train_custom.py')
@@ -72,12 +73,12 @@ class TrainingLauncherTest(unittest.TestCase):
                 deadline=time.monotonic()+3
                 while ai.busy and time.monotonic()<deadline:
                     ai.poll();time.sleep(.01)
-                self.assertFalse(ai.busy)
+                self.assertFalse(ai.busy);ai.poll();wait_training(service)
                 self.assertIn('专用规则已启用',state['snapshot']['cards'][0]['rule_status'])
                 self.assertEqual(api.call_args.args[2],2)
                 next_value=copy.deepcopy(value)
                 next_value['tasks'][0]['logs'][0]['head']=line.replace('100','200').replace('0.03','0.04')
-                service.receive((server.id,state['generation'],next_value,''))
+                service.receive((server.id,state['generation'],next_value,''));wait_training(service)
                 current=state['snapshot']['cards'][0]
                 self.assertIn('专用规则已启用',current['rule_status'])
                 self.assertEqual(current['progress']['step'],200)

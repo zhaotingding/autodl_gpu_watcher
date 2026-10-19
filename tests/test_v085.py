@@ -3,7 +3,9 @@ import unittest
 from unittest.mock import patch
 
 from autodl_watcher.remote_probe import discover_evidence, training_roots
-from autodl_watcher.training import DEFAULT_SCRIPTS, TrainingServer, TrainingTracker, parse_progress
+from autodl_watcher.training_config import DEFAULT_SCRIPTS, TrainingServer
+from autodl_watcher.training_tracker import TrainingTracker
+from autodl_watcher.training_events import parse_progress
 from test_training import snapshot
 
 

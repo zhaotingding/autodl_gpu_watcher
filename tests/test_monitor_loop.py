@@ -9,9 +9,11 @@ import unittest
 from unittest.mock import patch, call
 
 from autodl_watcher.collectors import PlatformAuthenticationError, PlatformTransientError
+from autodl_watcher.collectors.platform import InstanceIdentityError
 from autodl_watcher.gui import ROOT
 from autodl_watcher.config import load_config
-from autodl_watcher.main import _fresh_gpu_indices, main
+from autodl_watcher.main import main
+from autodl_watcher.monitor_state import _fresh_gpu_indices
 from autodl_watcher.models import GpuSample, OccupancyRecord, PlatformHost
 
 
@@ -24,53 +26,37 @@ class MonitorLoopTest(unittest.TestCase):
 
     def test_two_read_only_cycles_reach_persistence_without_power_on(self):
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [PlatformHost(
                     "gpu-999", 0, 2, ("autodl-999-1",), (("autodl-999-1", 0, 2),))]
                 platform.return_value.collect_occupancy.return_value = []
                 telemetry.return_value.collect.return_value = [GpuSample(
                     "gpu-999", 0, "Test GPU", 10, 1000, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "999", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "999", "--entry", "1",
                       "--user", "测试用户", "--poll-seconds", "0.01",
                       "--max-cycles", "2", "--runtime-dir", directory, "--dry-run", "--no-login"])
                 self.assertEqual(platform.return_value.collect.call_count, 2)
                 self.assertEqual(telemetry.return_value.collect.call_count, 2)
+                self.assertGreater(platform.return_value.collect_occupancy.call_count, 0)
                 platform.return_value.post_api_json.assert_not_called()
                 platform.return_value.close.assert_called_once()
             self.assertEqual(output.getvalue().count("监控999-1 |"), 2)
             self.assertTrue((Path(directory) / "state.json").exists())
             self.assertFalse((Path(directory) / "occupancy.db").exists())
 
-    def test_live_occupancy_checks_do_not_create_history_database(self):
-        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
-                platform.return_value.collect.return_value = [PlatformHost(
-                    "gpu-999", 0, 2, ("autodl-999-1",), (("autodl-999-1", 0, 2),))]
-                platform.return_value.collect_occupancy.return_value = []
-                telemetry.return_value.collect.return_value = [GpuSample(
-                    "gpu-999", 0, "Test GPU", 10, 1000, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "999", "--entry", "1",
-                      "--user", "测试用户", "--poll-seconds", "0.01",
-                      "--max-cycles", "2", "--runtime-dir", directory, "--dry-run", "--no-login"])
-                self.assertGreater(platform.return_value.collect_occupancy.call_count, 0)
-                platform.return_value.post_api_json.assert_not_called()
-            self.assertFalse((Path(directory) / "occupancy.db").exists())
-            self.assertTrue((Path(directory) / "state.json").exists())
-
     def test_missing_live_occupancy_still_blocks_power(self):
         config = self._conversion_config()
         host = PlatformHost("gpu-203", 1, 2, ("autodl-203-1",), (("autodl-203-1", 1, 2),))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = PlatformTransientError("occupancy timeout")
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--max-cycles", "2", "--runtime-dir", directory, "--no-login"])
                 self.assertGreater(platform.return_value.collect_occupancy.call_count, 0)
                 platform.return_value.post_api_json.assert_not_called()
@@ -81,11 +67,11 @@ class MonitorLoopTest(unittest.TestCase):
         for free in (0, 1):
             with self.subTest(free=free), tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
                 with patch("autodl_watcher.main.load_config", return_value=config), \
-                     patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                     patch("autodl_watcher.main.TelemetryApiCollector") as telemetry, \
-                     patch("autodl_watcher.main.AutoStartCoordinator.attempt") as attempt, \
-                     patch("autodl_watcher.main.AutoStartCoordinator.continue_switch") as switch, \
-                     patch("autodl_watcher.main.select_target") as select:
+                     patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                     patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry, \
+                     patch("autodl_watcher.monitor.AutoStartCoordinator.attempt") as attempt, \
+                     patch("autodl_watcher.monitor.AutoStartCoordinator.continue_switch") as switch, \
+                     patch("autodl_watcher.monitor.select_target") as select:
                     platform.return_value.collect.return_value = [PlatformHost("gpu-203", free, 2,
                         (target.machine_name,), ((target.machine_name, free, 2),))]
                     platform.return_value.get_instance_state.return_value = {"status": "shutdown", "start_mode": "gpu"}
@@ -93,7 +79,7 @@ class MonitorLoopTest(unittest.TestCase):
                     platform.return_value.collect_occupancy.return_value = []
                     telemetry.return_value.collect.side_effect = lambda: [
                         GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                           "--monitor-only", "--max-cycles", "3", "--runtime-dir", directory, "--no-login"])
                     attempt.assert_not_called()
                     switch.assert_not_called()
@@ -112,15 +98,15 @@ class MonitorLoopTest(unittest.TestCase):
         for failure in (PlatformTransientError("temporary disconnect"), TelemetryUnavailable("HTTP冷却中")):
             with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
                 with patch("autodl_watcher.main.load_config", return_value=self._conversion_config()), \
-                     patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                     patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                     patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                     patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                     platform.return_value.collect_occupancy.return_value = []
                     if isinstance(failure, PlatformTransientError):
                         platform.return_value.collect.side_effect = failure
                     else:
                         platform.return_value.collect.return_value = []
                         telemetry.return_value.collect.side_effect = failure
-                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                           "--monitor-only", "--max-cycles", "1", "--runtime-dir", directory, "--no-login"])
                     platform.return_value.post_api_json.assert_not_called()
                 self.assertIn("动作：等待重试（仅监控，不执行电源操作）", output.getvalue())
@@ -132,13 +118,13 @@ class MonitorLoopTest(unittest.TestCase):
             def finish_cycle():
                 stop.touch()
                 return [PlatformHost("gpu-203", 0, 2, ("autodl-203-1",), (("autodl-203-1", 0, 2),))]
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.side_effect = finish_cycle
                 platform.return_value.collect_occupancy.return_value = []
                 telemetry.return_value.collect.return_value = []
                 started = time.monotonic()
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--poll-seconds", "120", "--stop-file", str(stop), "--runtime-dir", directory,
                       "--dry-run", "--no-login"])
                 self.assertLess(time.monotonic() - started, 3)
@@ -148,7 +134,7 @@ class MonitorLoopTest(unittest.TestCase):
 
     @staticmethod
     def _conversion_config():
-        config = load_config(ROOT / "config.yaml")
+        config = load_config(Path(__file__).parent / "fixtures/monitor.yaml")
         return replace(config,
             auto_start=replace(config.auto_start, recheck_delay_seconds=0,
                                post_start_check_seconds=-1),
@@ -203,8 +189,8 @@ class MonitorLoopTest(unittest.TestCase):
                             ((first.machine_name, 1, 2), ("autodl-203-2", 1, 2)))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = lambda name, **_kw: self._one_free_gpu(name)
                 platform.return_value.get_instance_state.side_effect = state
@@ -212,7 +198,7 @@ class MonitorLoopTest(unittest.TestCase):
                 platform.return_value.post_api_json.side_effect = power
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "4", "--runtime-dir", directory,
                       "--no-login"])
                 self.assertEqual(platform.return_value.post_api_json.call_args_list, [
@@ -251,8 +237,8 @@ class MonitorLoopTest(unittest.TestCase):
 
                 with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
                     with patch("autodl_watcher.main.load_config", return_value=config), \
-                         patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                         patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                         patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                         patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                         platform.return_value.collect.side_effect = collect_platform
                         platform.return_value.collect_occupancy.side_effect = (
                             lambda machine_name, **kwargs: self._one_free_gpu(machine_name))
@@ -263,7 +249,7 @@ class MonitorLoopTest(unittest.TestCase):
                             "status": "running", "start_mode": "non_gpu"}]
                         platform.return_value.post_api_json.side_effect = api_response
                         telemetry.return_value.collect.side_effect = collect_telemetry
-                        main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                        main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                               "--live", "--convert-no-gpu", "--max-cycles", "2",
                               "--runtime-dir", directory, "--no-login"])
                         self.assertEqual(platform.return_value.post_api_json.call_args_list, [
@@ -293,8 +279,8 @@ class MonitorLoopTest(unittest.TestCase):
 
                 with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
                     with patch("autodl_watcher.main.load_config", return_value=config), \
-                         patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                         patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                         patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                         patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                         platform.return_value.collect.return_value = [host]
                         platform.return_value.collect_occupancy.side_effect = (
                             lambda machine_name, **kwargs: self._one_free_gpu(machine_name))
@@ -303,7 +289,7 @@ class MonitorLoopTest(unittest.TestCase):
                         platform.return_value.post_api_json.side_effect = api_response
                         telemetry.return_value.collect.side_effect = lambda: [
                             GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                        args = ["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                        args = ["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                                 "--live", "--max-cycles", "6", "--runtime-dir", directory, "--no-login"]
                         main(args + (["--convert-no-gpu"] if conversion else []))
                         requests = [call("/api/v2/instance/power_on", {
@@ -327,8 +313,8 @@ class MonitorLoopTest(unittest.TestCase):
                             (("autodl-203-1", 0, 2), ("autodl-203-2", 0, 2)))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = RuntimeError("popup unavailable")
                 platform.return_value.get_instance_state.return_value = {
@@ -337,7 +323,7 @@ class MonitorLoopTest(unittest.TestCase):
                 }
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "2",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("无卡运行", output.getvalue())
@@ -371,8 +357,8 @@ class MonitorLoopTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = collect_occupancy
                 platform.return_value.get_instance_state.side_effect = instance_state
@@ -380,7 +366,7 @@ class MonitorLoopTest(unittest.TestCase):
                 platform.return_value.post_api_json.side_effect = api_response
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "4",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("无卡运行", output.getvalue())
@@ -395,15 +381,15 @@ class MonitorLoopTest(unittest.TestCase):
                             (("autodl-203-1", 1, 2), ("autodl-203-2", 1, 2)))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with (patch("autodl_watcher.main.load_config", return_value=config),
-                  patch("autodl_watcher.main.PlatformBrowserCollector") as platform,
-                  patch("autodl_watcher.main.TelemetryApiCollector") as telemetry):
+                  patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform,
+                  patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry):
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = RuntimeError("popup unavailable")
                 platform.return_value.get_instance_state.return_value = {
                     "status": "running", "start_mode": "non_gpu", "host_account_gpu_clear": True}
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "2",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("目标入口占用详情不可用", output.getvalue())
@@ -460,8 +446,8 @@ class MonitorLoopTest(unittest.TestCase):
 
                 with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
                     with patch("autodl_watcher.main.load_config", return_value=config), \
-                         patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                         patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                         patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                         patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                         platform.return_value.collect.side_effect = collect_platform
                         platform.return_value.collect_occupancy.side_effect = collect_occupancy
                         platform.return_value.get_instance_state.side_effect = instance_state
@@ -469,7 +455,7 @@ class MonitorLoopTest(unittest.TestCase):
                         platform.return_value.post_api_json.side_effect = api_response
                         telemetry.return_value.collect.side_effect = lambda: [
                             GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                        main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                        main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                               "--live", "--convert-no-gpu", "--max-cycles", "2" if fresh_second else "4",
                               "--runtime-dir", directory, "--no-login"])
                         self.assertGreaterEqual(phase["occupancy_reads"], 3 if fresh_second else 4, output.getvalue())
@@ -502,8 +488,8 @@ class MonitorLoopTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = collect_occupancy
                 platform.return_value.get_instance_state.return_value = {
@@ -512,7 +498,7 @@ class MonitorLoopTest(unittest.TestCase):
                 }
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "3",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertGreaterEqual(occupancy_reads, 4)
@@ -556,9 +542,9 @@ class MonitorLoopTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry, \
-                 patch("autodl_watcher.main.time.monotonic",
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry, \
+                 patch("autodl_watcher.monitor.time.monotonic",
                        side_effect=(step / 10 for step in range(1000))):  # 固定推进各轮采样，避免依赖真实微秒计时。
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = collect_occupancy
@@ -566,7 +552,7 @@ class MonitorLoopTest(unittest.TestCase):
                 self._provide_account_snapshot(platform.return_value, first)
                 platform.return_value.post_api_json.side_effect = api_response
                 telemetry.return_value.collect.side_effect = collect_telemetry
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "7",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertEqual(platform.return_value.post_api_json.call_args_list, [
@@ -584,8 +570,8 @@ class MonitorLoopTest(unittest.TestCase):
             with self.subTest(other_gpu=other_gpu, query_error=query_error):
                 with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
                     with patch("autodl_watcher.main.load_config", return_value=config), \
-                         patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                         patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                         patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                         patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                         platform.return_value.collect.return_value = [host]
                         platform.return_value.collect_occupancy.side_effect = RuntimeError("popup unavailable")
                         if query_error:
@@ -597,7 +583,7 @@ class MonitorLoopTest(unittest.TestCase):
                             }
                         telemetry.return_value.collect.side_effect = lambda: [
                             GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                        main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                        main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                               "--live", "--convert-no-gpu", "--max-cycles", "2",
                               "--runtime-dir", directory, "--no-login"])
                         self.assertTrue(platform.return_value.get_instance_state.called)
@@ -605,11 +591,11 @@ class MonitorLoopTest(unittest.TestCase):
 
     def test_expired_ui_session_exits_and_releases_browser(self):
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
-            with patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.interactive_login") as login:
+            with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.interactive_login") as login:
                 platform.return_value.collect.side_effect = PlatformAuthenticationError("expired")
                 with self.assertRaises(SystemExit) as stopped:
-                    main(["--config", str(ROOT / "config.yaml"), "--runtime-dir", directory,
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--runtime-dir", directory,
                           "--dry-run", "--no-login"])
                 self.assertEqual(stopped.exception.code, 3)
                 self.assertIn('"status": "invalid"', output.getvalue())
@@ -629,8 +615,8 @@ class MonitorLoopTest(unittest.TestCase):
                                "", "2026-09-25 00:00:00")
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = (
                     lambda name, **_kwargs: [mine] if name == first.machine_name else [])
@@ -641,7 +627,7 @@ class MonitorLoopTest(unittest.TestCase):
                     "status": "running", "start_mode": "gpu", "host_account_gpu_clear": False}
                 telemetry.return_value.collect.return_value = [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "1",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("实例状态：有卡运行", output.getvalue())
@@ -661,8 +647,8 @@ class MonitorLoopTest(unittest.TestCase):
                                 "", "2026-09-25 00:00:00")
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = (
                     lambda name, **_kwargs: [other] if name == first.machine_name else [])
@@ -673,7 +659,7 @@ class MonitorLoopTest(unittest.TestCase):
                     "status": "running", "start_mode": "non_gpu", "host_account_gpu_clear": True}
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--dry-run", "--max-cycles", "5", "--runtime-dir", directory, "--no-login"])
                 self.assertIn("动作：等待GPU空位", output.getvalue())
                 self.assertNotIn("本账号已有有卡实例", output.getvalue())
@@ -691,8 +677,8 @@ class MonitorLoopTest(unittest.TestCase):
                               "aaaaaaaaaa-bbbbbbbb (甲(实验))\ncccccccccc-dddddddd\ninvalid-cell", "", "")
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = (
                     lambda name, **_kwargs: [row] if name == first.machine_name else [])
@@ -701,7 +687,7 @@ class MonitorLoopTest(unittest.TestCase):
                     "status": "running", "start_mode": "non_gpu", "host_account_gpu_clear": True}
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "2",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("#0:甲(实验)", output.getvalue())
@@ -721,22 +707,22 @@ class MonitorLoopTest(unittest.TestCase):
                 row = OccupancyRecord(datetime.now(), "gpu-203", first.machine_name, 0,
                                       "gpu-0", "Tesla V100", True, first.instance_uuid, old_user, "")
                 with patch("autodl_watcher.main.load_config", return_value=config), \
-                     patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                     patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                     patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                     patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                     platform.return_value.collect.return_value = [host]
                     platform.return_value.collect_occupancy.side_effect = (
                         lambda entry, **_kwargs: [row] if entry == first.machine_name else [])
                     platform.return_value.get_account_instances.return_value = [
                         {"instance_uuid": first.instance_uuid, "machine_name": first.machine_name}]
                     telemetry.return_value.collect.return_value = []
-                    main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                           "--dry-run", "--max-cycles", "1", "--runtime-dir", directory, "--no-login"])
                     self.assertIn(f"203-1[#0:{name}]", output.getvalue())
                     self.assertNotIn(first.instance_uuid, output.getvalue())
                     platform.return_value.post_api_json.assert_not_called()
 
     def test_binding_name_parser_preserves_identity_and_parentheses(self):
-        from autodl_watcher.main import _instance_bindings_from_cell
+        from autodl_watcher.monitor_state import _instance_bindings_from_cell
         for text, expected, complete in [
             ("aaaaaaaaaa-bbbbbbbb (甲)\ncccccccccc-dddddddd（乙）",
              [("aaaaaaaaaa-bbbbbbbb", "甲"), ("cccccccccc-dddddddd", "乙")], True),
@@ -762,8 +748,8 @@ class MonitorLoopTest(unittest.TestCase):
                                   "", "2026-09-25 00:00:00")
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = (
                     lambda name, **_kwargs: [unknown] if name == first.machine_name else [])
@@ -773,7 +759,7 @@ class MonitorLoopTest(unittest.TestCase):
                     "status": "running", "start_mode": "non_gpu", "host_account_gpu_clear": True}
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "2",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("占用身份未确认", output.getvalue())
@@ -791,8 +777,8 @@ class MonitorLoopTest(unittest.TestCase):
                                 "", "2026-09-25 00:00:00")
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = (
                     lambda name, **_kwargs: [other] if name == first.machine_name else [])
@@ -801,7 +787,7 @@ class MonitorLoopTest(unittest.TestCase):
                      "status": "running", "start_mode": "non_gpu"}]
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--dry-run", "--max-cycles", "5", "--runtime-dir", directory, "--no-login"])
                 self.assertIn("动作：等待GPU空位", output.getvalue())
                 self.assertNotIn("本账号已有有卡实例", output.getvalue())
@@ -819,8 +805,8 @@ class MonitorLoopTest(unittest.TestCase):
                                   "", "2026-09-25 00:00:00")
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.side_effect = (
                     lambda name, **_kwargs: [unknown] if name == first.machine_name else [])
@@ -831,7 +817,7 @@ class MonitorLoopTest(unittest.TestCase):
                     "status": "running", "start_mode": "non_gpu", "host_account_gpu_clear": True}
                 telemetry.return_value.collect.side_effect = lambda: [
                     GpuSample("gpu-203", 0, "Tesla V100", 0, 0, 32000, datetime.now())]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "2",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("占用身份未确认", output.getvalue())
@@ -844,22 +830,20 @@ class MonitorLoopTest(unittest.TestCase):
                             (("autodl-203-1", 0, 2), ("autodl-203-2", 0, 2)))
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()) as output:
             with patch("autodl_watcher.main.load_config", return_value=config), \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.return_value = [host]
                 platform.return_value.collect_occupancy.return_value = []
-                platform.return_value.get_instance_state.side_effect = PlatformTransientError(
+                platform.return_value.get_instance_state.side_effect = InstanceIdentityError(
                     "实例列表中目标 UUID 缺失或重复")
                 telemetry.return_value.collect.return_value = []
-                main(["--config", str(ROOT / "config.yaml"), "--host", "203", "--entry", "1",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "203", "--entry", "1",
                       "--live", "--convert-no-gpu", "--max-cycles", "1",
                       "--runtime-dir", directory, "--no-login"])
                 self.assertIn("配置实例不存在或ID已过期", output.getvalue())
                 platform.return_value.post_api_json.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class SessionMonitorRegressionTest(unittest.TestCase):
@@ -871,15 +855,19 @@ class SessionMonitorRegressionTest(unittest.TestCase):
         for failure_source, expected in (("platform", ["valid", "unknown"]), ("telemetry", ["valid", "valid"])):
             with self.subTest(source=failure_source), tempfile.TemporaryDirectory() as directory, \
                  redirect_stdout(io.StringIO()) as output, \
-                 patch("autodl_watcher.main.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.main.TelemetryApiCollector") as telemetry:
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
                 platform.return_value.collect.side_effect = [[host], RuntimeError("machine response malformed")] if failure_source == "platform" else [[host], [host]]
                 platform.return_value.collect_occupancy.return_value = []
                 telemetry.return_value.collect.side_effect = [[sample], RuntimeError("telemetry unavailable")] if failure_source == "telemetry" else [[sample], [sample]]
-                main(["--config", str(ROOT / "config.yaml"), "--host", "999", "--entry", "1", "--dry-run", "--no-login",
+                main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"), "--host", "999", "--entry", "1", "--dry-run", "--no-login",
                       "--poll-seconds", "0.01", "--max-cycles", "2", "--runtime-dir", directory])
                 statuses = [json.loads(line[len(SESSION_PREFIX):])["status"] for line in output.getvalue().splitlines()
                             if line.startswith(SESSION_PREFIX)]
                 self.assertEqual(statuses, expected)
                 platform.return_value.post_api_json.assert_not_called()
                 platform.return_value.close.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

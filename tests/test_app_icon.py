@@ -3,6 +3,7 @@ from ctypes import wintypes
 import gc
 from io import BytesIO
 import json
+import yaml
 import os
 from pathlib import Path
 import subprocess
@@ -159,7 +160,7 @@ class WindowIconTest(unittest.TestCase):
         restored.reset();self.root.update()
         image,_=native_icon(other,True)
         self.assertNotEqual(image.getpixel((image.width//2,image.height//2))[:3],(239,32,48))
-        self.assertIsNone(json.loads(restored.config.read_text())['file'])
+        self.assertIsNone(yaml.safe_load(restored.config.read_text())['file'])
         other.destroy()
 
     def test_invalid_import_keeps_current_icon_and_preference(self):
