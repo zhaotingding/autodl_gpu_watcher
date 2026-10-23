@@ -6,7 +6,7 @@ import socket
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from autodl_watcher.collectors.telemetry import TelemetryApiCollector, TelemetryUnavailable
-from autodl_watcher.config import TelemetryConfig
+from autodl_watcher.config import TelemetryConfig, load_config
 from autodl_watcher.gui import ROOT
 from autodl_watcher.main import main
 from autodl_watcher.models import PlatformHost
@@ -24,6 +24,43 @@ from autodl_watcher.session import SESSION_PREFIX
 
 
 class TelemetryRecoveryTest(unittest.TestCase):
+    def test_invalid_endpoint_is_configuration_error_without_http_or_backoff(self):
+        for endpoint in ("", "  ", "telemetry.example.invalid/latest", "ftp://example.invalid/latest",
+                         "http:///latest", "https://example.invalid:bad/latest", "https://bad host/latest"):
+            with self.subTest(endpoint=endpoint):
+                collector = self.collector()
+                collector.config = replace(collector.config, endpoint=endpoint)
+                collector._session = Mock()
+                collector._session.get.return_value.json.return_value = {"items": []}
+                with self.assertRaisesRegex(ValueError, "Telemetry 待配置"):
+                    collector.collect()
+                collector._session.get.assert_not_called()
+                self.assertEqual(collector._failed_rounds, 0)
+                self.assertEqual(collector._retry_at, 0)
+
+    def test_invalid_endpoint_stops_monitor_before_platform_and_power_initialization(self):
+        config = load_config(Path(__file__).parent / "fixtures/monitor.yaml")
+        config = replace(config, telemetry=replace(config.telemetry, endpoint=""))
+        for mode in ("--monitor-only", "--live"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
+                 redirect_stderr(io.StringIO()) as errors, redirect_stdout(io.StringIO()), \
+                 patch("autodl_watcher.main.prepare_application"), \
+                 patch("autodl_watcher.main.load_config", return_value=config), \
+                 patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry, \
+                 patch("autodl_watcher.monitor.AutoStartCoordinator") as power, \
+                 patch("autodl_watcher.monitor._setup_logging") as logging:
+                with self.assertRaises(SystemExit) as stopped:
+                    main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"),
+                          "--host", "203", "--entry", "1", mode, "--no-login",
+                          "--max-cycles", "1", "--runtime-dir", directory])
+                self.assertEqual(stopped.exception.code, 2)
+                self.assertIn("Telemetry 待配置", errors.getvalue())
+                platform.assert_not_called()
+                telemetry.assert_not_called()
+                power.assert_not_called()
+                logging.assert_not_called()
+
     def collector(self):
         collector = TelemetryApiCollector(TelemetryConfig(
             endpoint="http://127.0.0.1/api/latest", timeout_seconds=2,

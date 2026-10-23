@@ -44,6 +44,15 @@
 
 边界：本次真实旧profile未持久化可用认证，但未确定导致缺失的历史时序。强杀对照的两次合成样本均保留数据，不得写成“强杀一定丢token”；用户完成登录并点击确认后，最终正常关窗、同步及真实主机API核验通过（live-handoff.yaml）；最终本地GUI绿色会话状态已截图核对。隔离首次启动模态窗曾阻止正常退出，此时超时并禁止复制；应由用户先处理浏览器提示，不自动确认。未实测Edge右上角X和多窗口全覆盖，验证码仍需人工。验证记录见仓库docs/重构验收记录.md及同级归档2026-10-16-login-recovery。
 
+## PowerShell 与 Python 的输出编码（2026-10-20）
+
+适用：源码/Conda 启动后，登录收尾出现 subprocess `_readerthread` 的 UTF-8 `UnicodeDecodeError`。本机已复现 Windows PowerShell 按中文代码页输出中文命令行/诊断，而 Python UTF-8 模式用 UTF-8 解码的冲突；不是读取线程报错就能推断平台认证失败。
+
+- 登录查询脚本显式设置 `[Console]::OutputEncoding` 和 `$OutputEncoding` 为无 BOM UTF-8；不能假定 Python 的 `PYTHONUTF8=1` 会改变 PowerShell 的输出编码。
+- subprocess 捕获原始字节，查询命令行在调用线程严格按 UTF-8 解码。解码失败须转成 LocalStartupError 并停止交接，不用忽略错误或空列表冒充浏览器已退出。
+- 关窗请求按字节接收诊断并检查退出码，随后仍需查询确认源profile进程退出。编码修复不能取消等待、扩大进程筛选或覆盖在用资料。
+- 已验证：真实 PowerShell 下的合成中文/空格/单引号/emoji路径与中文 stderr；异常字节阻止删锁/复制并保留两份资料；25 项登录及 41 项 GUI 回归通过。本轮未操作真实登录资料或重验真实账号会话。
+
 ## Telemetry断连的判断边界
 
 - `RemoteDisconnected`本身不证明SSH断连、登录失效或暴力扫描。2026-10-07日志中连续6轮断连后恢复，当时本机自有连接快照未见积压、无429证据，断连来源仍未确认。

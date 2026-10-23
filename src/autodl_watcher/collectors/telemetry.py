@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from ..config import TelemetryConfig
+from ..config import TelemetryConfig, validate_telemetry_endpoint
 from ..models import GpuSample, PlatformHost
 
 
@@ -103,6 +103,7 @@ class TelemetryApiCollector:  # Telemetry API 采集器 — 通过 HTTP GET 拉�
                 and exc.response.status_code >= 500)
 
     def collect(self) -> list[GpuSample]:
+        endpoint = validate_telemetry_endpoint(self.config.endpoint)  # 本地配置错误不计入网络退避。
         remaining = self._retry_at - time.monotonic()
         if remaining > 0:
             raise TelemetryUnavailable(
@@ -113,7 +114,7 @@ class TelemetryApiCollector:  # Telemetry API 采集器 — 通过 HTTP GET 拉�
             try:
                 try:
                     response = self._session.get(
-                        self.config.endpoint,
+                        endpoint,
                         params={"_t": int(time.time() * 1000)},
                         timeout=self.config.timeout_seconds,
                     )

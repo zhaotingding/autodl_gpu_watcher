@@ -14,22 +14,32 @@ from autodl_watcher.main import _build_parser, apply_monitor_options, main, posi
 
 
 class GuiOptionsTest(unittest.TestCase):
-    def test_pythonw_gui_uses_console_interpreter_for_piped_workers(self):
-        executable = str(Path("runtime") / "pythonw.exe")
-        with patch("sys.executable", executable):
-            self.assertEqual(worker_python(), str(Path("runtime") / "python.exe"))
+    def test_pythonw_gui_uses_same_environment_for_piped_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            console = Path(directory) / "python.exe"  # 必须使用同环境实际存在的控制台解释器。
+            console.touch()
+            with patch("sys.executable", str(console.with_name("pythonw.exe"))):
+                self.assertEqual(worker_python(), str(console))
 
-    def test_source_and_frozen_worker_commands(self):
-        import sys
-        with patch.object(sys, "frozen", False, create=True):
-            command = worker_command("discover")
-            self.assertEqual(command[1:], ["-u", "-m", "autodl_watcher.gui", "--discover"])
-        with patch.object(sys, "frozen", True, create=True):
-            command = worker_command("monitor", "--dry-run")
-            self.assertEqual(command, [str(ROOT / "_internal/AutoDLWorker.exe"), "monitor", "--dry-run"])
-            self.assertNotIn("-m", command)
-        with self.assertRaises(KeyError):
-            worker_command("arbitrary-module")
+    def test_missing_console_python_is_reported_without_global_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("sys.executable", str(Path(directory) / "pythonw.exe")):
+                with self.assertRaisesRegex(FileNotFoundError, "项目解释器不存在"):
+                    worker_python()  # 同目录缺失时不能搜索PATH或改用base。
+
+    def test_worker_commands_reuse_gui_interpreter_and_disable_user_site(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "python.exe"
+            executable.touch()
+            with patch("sys.executable", str(executable)):
+                self.assertEqual(worker_command("discover"),
+                                 [str(executable), "-s", "-u", "-m", "autodl_watcher.gui", "--discover"])
+                self.assertEqual(worker_command("monitor", "--dry-run"),
+                                 [str(executable), "-s", "-u", "-m", "autodl_watcher.main", "--dry-run"])
+                self.assertEqual(worker_command("login"),
+                                 [str(executable), "-s", "-u", "-m", "autodl_watcher.login"])
+                with self.assertRaises(KeyError):
+                    worker_command("arbitrary-module")  # 保留任务白名单，不能借入口执行任意模块。
 
     def test_log_colors_prioritize_failures(self):
         self.assertEqual(log_tag("开机成功，但验证失败"), "error")
@@ -128,6 +138,31 @@ class GuiOptionsTest(unittest.TestCase):
         telemetry.return_value.collect.assert_called_once()
         telemetry.return_value.close.assert_called_once()
 
+    def test_discover_without_telemetry_preserves_platform_hosts_and_valid_session(self):
+        from autodl_watcher.models import PlatformHost
+        from autodl_watcher.session import GPU_PREFIX
+        for endpoint in ("", "invalid-endpoint"):
+            config = replace(self.config, telemetry=replace(self.config.telemetry, endpoint=endpoint))
+            with self.subTest(endpoint=endpoint), \
+                 patch("autodl_watcher.gui.load_config", return_value=config), \
+                 patch("autodl_watcher.collectors.PlatformBrowserCollector") as platform, \
+                 patch("autodl_watcher.collectors.TelemetryApiCollector") as telemetry, \
+                 patch("sys.stdout", new_callable=io.StringIO) as output:
+                platform.return_value.collect.return_value = [
+                    PlatformHost("gpu-203", 0, 2, ("autodl-203-1",), (("autodl-203-1", 0, 2),))]
+                platform.return_value.get_account_instances.return_value = []
+                discover()
+            lines = output.getvalue().splitlines()
+            statuses = [json.loads(line[len(SESSION_PREFIX):])["status"]
+                        for line in lines if line.startswith(SESSION_PREFIX)]
+            self.assertEqual(statuses, ["checking", "valid"])
+            self.assertIn("autodl-203-1", output.getvalue())
+            gpu = next(json.loads(line[len(GPU_PREFIX):]) for line in lines if line.startswith(GPU_PREFIX))
+            self.assertIn("Telemetry 待配置", gpu["error"])
+            self.assertEqual(gpu["samples"], [])
+            telemetry.assert_not_called()
+            platform.return_value.close.assert_called_once()
+
     def test_gpu_message_includes_visible_full_host_but_excludes_other_hosts(self):
         from datetime import datetime
         from autodl_watcher.models import GpuSample, PlatformHost
@@ -152,6 +187,16 @@ class GuiOptionsTest(unittest.TestCase):
 
     def setUp(self):
         self.config = load_config(Path(__file__).parent / "fixtures/monitor.yaml")
+        loader = patch("autodl_watcher.gui.load_config", return_value=self.config)
+        loader.start()  # 主机发现测试只读夹具，不能隐式加载维护者个人配置。
+        self.addCleanup(loader.stop)
+
+    def test_monitor_command_rejects_missing_telemetry_before_starting_worker(self):
+        config = replace(self.config, telemetry=replace(self.config.telemetry, endpoint=""))
+        with patch("autodl_watcher.gui.worker_command") as worker:
+            with self.assertRaisesRegex(ValueError, "Telemetry 待配置"):
+                monitor_command(config, "autodl-203-1", "user", 60, False, Path("stop"))
+            worker.assert_not_called()
 
     def test_project_local_runtime_paths(self):
         self.assertEqual(self.config.platform.user_data_dir, Path(__file__).parent / "fixtures/runtime" / "browser_profile")

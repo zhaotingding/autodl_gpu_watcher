@@ -7,6 +7,7 @@ import yaml
 import os
 from pathlib import Path
 import subprocess
+from unittest.mock import patch
 import tempfile
 import tkinter as tk
 import unittest
@@ -115,15 +116,117 @@ class IconImportTest(unittest.TestCase):
     def test_shortcut_reads_back_target_and_icon(self):
         exe=self.folder/'带空格 app.exe';exe.write_bytes(b'test only; never execute')
         icon=self.folder/'author.ico';authored_icon(icon)
-        link=self.folder/'测试入口.lnk';save_shortcut(link,exe,icon)
+        conda=self.folder/'Conda install/Scripts/conda.exe';conda.parent.mkdir(parents=True);conda.touch()
+        arguments=['--env','autodl-dev','--conda',str(conda)]
+        link=self.folder/'测试入口.lnk';save_shortcut(link,exe,icon,arguments=arguments)
         env=os.environ.copy();env['AUTODL_LINK']=str(link)
-        command="$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:AUTODL_LINK); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @{target=$s.TargetPath;icon=$s.IconLocation;working=$s.WorkingDirectory}|ConvertTo-Json -Compress"
+        command="$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:AUTODL_LINK); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @{target=$s.TargetPath;icon=$s.IconLocation;working=$s.WorkingDirectory;arguments=$s.Arguments}|ConvertTo-Json -Compress"
         result=subprocess.run(['powershell.exe','-NoProfile','-Command',command],env=env,capture_output=True,encoding='utf-8',creationflags=subprocess.CREATE_NO_WINDOW,check=True)
         value=json.loads(result.stdout)
+        self.assertEqual(value['arguments'],subprocess.list2cmdline(arguments))
         self.assertEqual(value['target'],str(exe));self.assertEqual(value['icon'],str(icon)+',0');self.assertEqual(value['working'],str(self.folder))
         for small,color in ((True,(239,32,48)),(False,(32,80,237))):
             image,meta=shell_icon(link,small)
             self.assertEqual(image.getpixel((image.width//2,image.height//2))[:3],color,meta)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows 启动器图标与快捷方式")
+class SourceLauncherIconTest(unittest.TestCase):
+    def test_source_sync_uses_explicit_launcher_and_the_current_project_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher = root / 'custom launcher.exe'
+            launcher.touch()
+            manager = IconManager.__new__(IconManager)
+            manager.folder, manager.changed = root / '.ui', True
+            env = {'AUTODL_APP_ROOT': str(root), 'PYTHONPATH': 'selected source'}
+            with patch.dict(os.environ, AUTODL_LAUNCHER_EXE=str(launcher)), \
+                 patch('autodl_watcher.app_icon.project_python', return_value='project/python.exe', create=True), \
+                 patch('autodl_watcher.app_icon.child_environment', return_value=env, create=True) as environment, \
+                 patch('autodl_watcher.app_icon.subprocess.Popen') as spawn:
+                manager.sync_executable()
+            environment.assert_called_once_with(root)
+            spawn.assert_called_once()
+            self.assertEqual(spawn.call_args.args[0], ['project/python.exe', '-u', '-m',
+                             'autodl_watcher.exe_icon', str(os.getpid()), str(launcher)])
+            self.assertEqual(spawn.call_args.kwargs['env'], env)
+            self.assertFalse(manager.changed)
+
+    def test_source_sync_never_guesses_a_legacy_executable_without_explicit_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'AutoDLWatcher.exe').write_bytes(b'legacy executable; never run')
+            manager = IconManager.__new__(IconManager)
+            manager.folder, manager.changed = root / '.ui', True
+            with patch.dict(os.environ, {}, clear=True), patch('autodl_watcher.app_icon.subprocess.Popen') as spawn:
+                manager.sync_executable()
+            spawn.assert_not_called()
+
+    def test_export_without_launcher_reports_source_mode_instead_of_targeting_legacy_exe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'AutoDLWatcher.exe').write_bytes(b'legacy executable; never run')
+            manager = type('Manager', (), {'folder': root / '.ui', 'path': None})()
+            settings = IconSettings.__new__(IconSettings)
+            settings.manager, settings.status = manager, unittest.mock.Mock()
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch('autodl_watcher.app_icon.filedialog.asksaveasfilename', return_value=str(root / 'entry.lnk')), \
+                 patch('autodl_watcher.app_icon.save_shortcut') as save:
+                settings.shortcut()
+            save.assert_not_called()
+            self.assertIn('轻量启动器', settings.status.configure.call_args.kwargs['text'])
+
+    def test_export_keeps_selected_conda_environment_and_manager_in_shortcut_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher, icon, conda = root / 'launcher.exe', root / 'author.ico', root / 'Conda manager/conda.exe'
+            launcher.touch()
+            conda.parent.mkdir()
+            conda.touch()
+            manager = type('Manager', (), {'folder': root / '.ui', 'path': icon})()
+            settings = IconSettings.__new__(IconSettings)
+            settings.manager, settings.status = manager, unittest.mock.Mock()
+            env = {'AUTODL_LAUNCHER_EXE': str(launcher), 'AUTODL_CONDA_ENV': 'autodl-dev',
+                   'AUTODL_CONDA_EXE': str(conda), 'CONDA_DEFAULT_ENV': 'base'}
+            with patch.dict(os.environ, env), \
+                 patch('autodl_watcher.app_icon.filedialog.asksaveasfilename', return_value=str(root / 'entry.lnk')), \
+                 patch('autodl_watcher.app_icon.save_shortcut') as save:
+                settings.shortcut()
+            save.assert_called_once_with(root / 'entry.lnk', launcher, icon,
+                                         arguments=['--env', 'autodl-dev', '--conda', str(conda)])
+
+    def test_export_rejects_base_and_missing_conda_instead_of_using_global_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher, conda = root / 'launcher.exe', root / 'conda.exe'
+            launcher.touch()
+            conda.touch()
+            settings = IconSettings.__new__(IconSettings)
+            settings.manager = type('Manager', (), {'folder': root / '.ui', 'path': None})()
+            settings.status = unittest.mock.Mock()
+            cases = [{'CONDA_DEFAULT_ENV': 'base', 'CONDA_EXE': str(conda)},
+                     {'CONDA_DEFAULT_ENV': 'autodl-dev'}]
+            for case in cases:
+                with self.subTest(case=case), \
+                     patch.dict(os.environ, {'AUTODL_LAUNCHER_EXE': str(launcher), **case}, clear=True), \
+                     patch('autodl_watcher.app_icon.filedialog.asksaveasfilename', return_value=str(root / 'entry.lnk')), \
+                     patch('autodl_watcher.app_icon.save_shortcut') as save:
+                    settings.shortcut()
+                save.assert_not_called()
+                self.assertIn('Conda', settings.status.configure.call_args.kwargs['text'])
+
+    def test_sync_refuses_python_interpreter_as_launcher_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            interpreter = root / 'python.exe'
+            interpreter.touch()
+            manager = IconManager.__new__(IconManager)
+            manager.folder, manager.changed = root / '.ui', True
+            with patch.dict(os.environ, AUTODL_LAUNCHER_EXE=str(interpreter)), \
+                 patch('autodl_watcher.app_icon.subprocess.Popen') as spawn:
+                with self.assertRaisesRegex(OSError, '启动器'):
+                    manager.sync_executable()
+            spawn.assert_not_called()
 
 
 @unittest.skipUnless(os.name=='nt','Windows原生窗口图标')

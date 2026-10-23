@@ -1,4 +1,6 @@
 """干净克隆可以先配置 SSH，无需已有平台账号或安装浏览器。"""
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import tempfile
 import tkinter as tk
@@ -10,19 +12,21 @@ from autodl_watcher.paths import prepare_application
 
 
 class FirstStartTest(unittest.TestCase):
-    def test_unconfigured_monitor_can_stop_before_creating_network_resources(self):
+    def test_unconfigured_monitor_reports_setup_before_creating_network_resources(self):
         from autodl_watcher.main import main
         with tempfile.TemporaryDirectory() as directory:
             folder = prepare_application(Path(directory))
-            stop = folder / "stop"
-            stop.touch()
             with patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
-                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry:
-                main(["--config", str(folder / "config.yaml"), "--monitor-only", "--no-login",
-                      "--stop-file", str(stop), "--runtime-dir", str(folder)])
-                platform.return_value.collect.assert_not_called()
-                telemetry.return_value.collect.assert_not_called()
-                self.assertTrue((folder / "state.json").is_file())
+                 patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry, \
+                 redirect_stderr(io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as stopped:
+                    main(["--config", str(folder / "config.yaml"), "--monitor-only", "--no-login",
+                          "--runtime-dir", str(folder)])
+                self.assertEqual(stopped.exception.code, 2)
+                self.assertIn("Telemetry 待配置", output.getvalue())
+                platform.assert_not_called()
+                telemetry.assert_not_called()
+                self.assertFalse((folder / "state.json").exists())
 
     def test_safe_defaults_open_settings_without_browser_or_monitor(self):
         with tempfile.TemporaryDirectory() as directory:

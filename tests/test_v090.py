@@ -1,6 +1,9 @@
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
+from unittest.mock import Mock, patch
 import tempfile
 import unittest
 
@@ -42,12 +45,80 @@ class ProcessTimeTest(unittest.TestCase):
         self.assertIn("持续时间未确认", process_time({"started_at": 100}))
 
 
+class SourceIconWorkerTest(unittest.TestCase):
+    def test_explicit_target_is_separate_from_the_data_root(self):
+        from autodl_watcher import exe_icon
+        from autodl_watcher.yaml_settings import read_settings, write_settings
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_root, code_root = root / 'personal data', root / 'checkout'
+            data_root.mkdir()
+            code_root.mkdir()
+            target = code_root / 'selected launcher.exe'
+            target.write_bytes(b'launcher placeholder; never execute')
+            icon = data_root / '.ui' / 'icons' / 'chosen.ico'
+            icon.parent.mkdir(parents=True)
+            icon.write_bytes(b'icon bytes read only by mocked resource writer')
+            write_settings(data_root / '.ui/icon.yaml', {'file': 'icons/chosen.ico'})
+            kernel = Mock()
+            kernel.OpenProcess.return_value, kernel.WaitForSingleObject.return_value = 1, 0
+            with patch.dict(os.environ, AUTODL_APP_ROOT=str(data_root)), \
+                 patch.object(sys, 'argv', ['autodl_watcher.exe_icon', '12345', str(target)]), \
+                 patch.object(exe_icon.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(exe_icon, 'replace_icon') as replace:
+                exe_icon.main()
+            replace.assert_called_once_with(target, icon, backup_dir=data_root / '.ui')
+            kernel.WaitForSingleObject.assert_called_once_with(1, 120000)
+            self.assertIn('已同步', read_settings(data_root / '.ui/icon-executable-status.yaml')['message'])
+            self.assertFalse((code_root / '.ui').exists())
+
+    def test_python_interpreter_cannot_be_rewritten_by_the_icon_worker(self):
+        from autodl_watcher import exe_icon
+        from autodl_watcher.yaml_settings import read_settings, write_settings
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            interpreter = root / 'python.exe'
+            original = b'project interpreter; never execute'
+            interpreter.write_bytes(original)
+            write_settings(root / '.ui/icon.yaml', {'file': None})
+            kernel = Mock()
+            kernel.OpenProcess.return_value, kernel.WaitForSingleObject.return_value = 1, 0
+            with patch.dict(os.environ, AUTODL_APP_ROOT=str(root)), \
+                 patch.object(sys, 'argv', ['autodl_watcher.exe_icon', '12345', str(interpreter)]), \
+                 patch.object(exe_icon.ctypes, 'WinDLL', return_value=kernel, create=True), \
+                 patch.object(exe_icon, 'replace_icon') as replace:
+                exe_icon.main()
+            replace.assert_not_called()
+            self.assertEqual(interpreter.read_bytes(), original)
+            self.assertIn('失败', read_settings(root / '.ui/icon-executable-status.yaml')['message'])
+
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows 图标模块入口')
+    def test_module_entry_runs_and_reports_rejected_interpreter_target(self):
+        from autodl_watcher.yaml_settings import read_settings
+        checkout = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            interpreter = root / 'python.exe'
+            original = b'fake interpreter; never execute or rewrite'
+            interpreter.write_bytes(original)
+            env = os.environ.copy()
+            env.update(AUTODL_APP_ROOT=str(root), PYTHONPATH=str(checkout / 'src'), PYTHONUTF8='1')
+            result = subprocess.run([sys.executable, '-m', 'autodl_watcher.exe_icon', '12345', str(interpreter)],
+                                    cwd=root, env=env, capture_output=True, text=True, encoding='utf-8', timeout=15,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)  # 真正执行模块入口，不启动 GUI 或任何 EXE。
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(interpreter.read_bytes(), original)
+            self.assertIn('失败', read_settings(root / '.ui/icon-executable-status.yaml')['message'])
+
+
 @unittest.skipUnless(os.name == "nt", "Windows EXE资源")
 class ExecutableIconTest(unittest.TestCase):
     def test_resource_update_keeps_program_archive_and_authored_frames(self):
         root = Path(__file__).resolve().parents[1]
-        if not (root / "AutoDLWatcher.exe").is_file():
-            self.skipTest("尚未构建 Windows 成品；源码检出不要求自带 EXE")
+        staged = Path(os.environ.get("AUTODL_TEST_LAUNCHER", root / ".tools/build/launcher/AutoDLWatcher.exe"))
+        if not staged.is_file():
+            self.skipTest("尚未构建轻量启动器；不使用保留的根目录旧 EXE 代替验收")
         try:
             from PyInstaller.archive.readers import CArchiveReader
         except ImportError:
@@ -57,7 +128,7 @@ class ExecutableIconTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)
             exe = folder / "AutoDLWatcher.exe"
-            shutil.copyfile(root / "AutoDLWatcher.exe", exe)
+            shutil.copyfile(staged, exe)  # 只改临时副本，保留旧成品与新暂存入口。
             original = CArchiveReader(str(exe))
             toc = original.toc
             content = {key: original.extract(key) for key in toc}
