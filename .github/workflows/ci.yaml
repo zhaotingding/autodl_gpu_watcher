@@ -6,26 +6,41 @@ jobs:
     strategy:
       matrix:
         python: ['3.10', '3.12']
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONNOUSERSITE: '1'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: conda-incubator/setup-miniconda@v4
         with:
+          activate-environment: auto-gpu
           python-version: ${{ matrix.python }}
-      - name: Install editable source
-        run: python -m pip install -e .
-      - name: Offline tests without personal settings
-        run: python -m unittest discover -s tests -q
-      - name: Build wheel
-        run: python -m pip wheel --no-deps . -w dist
-      - name: Install wheel in a separate environment
-        shell: pwsh
+          auto-activate: false
+          channels: conda-forge
+          add-pip-as-python-dependency: true
+      - name: Install editable source in the project Conda environment
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          python -m venv "$env:RUNNER_TEMP/wheel-env"
-          $python = "$env:RUNNER_TEMP/wheel-env/Scripts/python.exe"
-          & $python -m pip install (Get-ChildItem dist/autodl_gpu_watcher-*.whl | Select-Object -First 1).FullName
+          conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user -e .
+          conda run -n auto-gpu --no-capture-output python -s -m pip check
+      - name: Offline tests without personal settings
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          conda run -n auto-gpu --no-capture-output python -s -m unittest discover -s tests -q
+      - name: Build wheel
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          conda run -n auto-gpu --no-capture-output python -s -m pip wheel --no-deps . -w dist
+      - name: Replace editable install with wheel in the same project environment
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $wheelPath = (Get-ChildItem dist/autodl_gpu_watcher-*.whl | Select-Object -First 1).FullName
+          conda run -n auto-gpu --no-capture-output python -s -m pip uninstall -y autodl-gpu-watcher
+          conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user $wheelPath
           $env:AUTODL_APP_ROOT = "$env:RUNNER_TEMP/wheel-data"
           Set-Location $env:RUNNER_TEMP
-          & $python -m autodl_watcher --version
-          & $python -c "from autodl_watcher.paths import prepare_application, default_config_path; from autodl_watcher.config import load_config; prepare_application(); c=load_config(default_config_path()); assert not c.auto_start.enabled and not c.auto_start.targets"
-          & $python -m pip check
+          conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher --version
+          conda run -n auto-gpu --no-capture-output python -s -c "import sys; from pathlib import Path; import autodl_watcher; assert Path(autodl_watcher.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()); from autodl_watcher.paths import prepare_application, default_config_path; from autodl_watcher.config import load_config; prepare_application(); c=load_config(default_config_path()); assert not c.auto_start.enabled and not c.auto_start.targets"
+          conda run -n auto-gpu --no-capture-output python -s -m pip check

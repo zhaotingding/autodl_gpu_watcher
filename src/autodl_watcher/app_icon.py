@@ -3,13 +3,14 @@ from io import BytesIO
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tkinter as tk
 from tkinter import filedialog, ttk
 import uuid
 
 from PIL import Image, ImageOps, ImageTk
 from .yaml_settings import read_settings, settings_source, write_settings
+from .launcher import child_environment, project_python  # GUI 和图标辅助进程使用同一项目环境。
+from .exe_icon import launcher_target  # 只操作启动器显式传入的 EXE，不猜测保留的旧程序。
 
 SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
@@ -35,16 +36,17 @@ def load_icon(path):
     return output.getvalue(), frames, f"PNG原图 {original.width}×{original.height} · 已生成 " + "、".join(map(str, SIZES))
 
 
-def save_shortcut(target, executable, icon):
+def save_shortcut(target, executable, icon, *, arguments=()):
     """另存用户选择的快捷方式，不覆盖其它入口或修改任务栏固定项。"""
     if os.name != "nt":
         raise ValueError("启动快捷方式仅支持Windows")
     if not executable.is_file():
-        raise ValueError("未找到已打包的AutoDLWatcher.exe")
+        raise ValueError("未找到所选轻量启动器，请重新构建后再导出快捷方式")
     env = os.environ.copy()
-    env.update(AUTODL_LINK=str(target), AUTODL_EXE=str(executable), AUTODL_ICON=str(icon))
+    env.update(AUTODL_LINK=str(target), AUTODL_EXE=str(executable), AUTODL_ICON=str(icon),
+               AUTODL_ARGS=subprocess.list2cmdline(list(arguments)))  # Windows 参数单独保存，保留解释器路径中的空格。
     shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    command = "$ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut($env:AUTODL_LINK); $s.TargetPath=$env:AUTODL_EXE; $s.WorkingDirectory=Split-Path -LiteralPath $env:AUTODL_EXE; $s.IconLocation=$env:AUTODL_ICON+',0'; $s.Save()"
+    command = "$ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut($env:AUTODL_LINK); $s.TargetPath=$env:AUTODL_EXE; $s.Arguments=$env:AUTODL_ARGS; $s.WorkingDirectory=Split-Path -LiteralPath $env:AUTODL_EXE; $s.IconLocation=$env:AUTODL_ICON+',0'; $s.Save()"
     result = subprocess.run([str(shell), "-NoProfile", "-NonInteractive", "-Command", command], env=env,
                             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
     if result.returncode:
@@ -126,15 +128,15 @@ class IconManager:
         self.changed = True
 
     def sync_executable(self):
-        if not self.changed or not getattr(sys, "frozen", False):
+        if not self.changed or os.name != "nt":  # 纯窗口图标不需要后台任务，EXE 资源只支持 Windows。
             return
-        executable = self.folder.parent / "AutoDLWatcher.exe"
-        worker = executable.parent / "_internal" / "AutoDLWorker.exe"
-        env = os.environ.copy()
-        env["AUTODL_APP_ROOT"] = str(executable.parent)
-        subprocess.Popen([str(worker), "icon", str(os.getpid())], env=env,
-                         creationflags=subprocess.CREATE_NO_WINDOW)
-        self.changed = False
+        executable = launcher_target(os.environ.get("AUTODL_LAUNCHER_EXE"))  # 不以资料根猜测旧 EXE。
+        if executable is None:  # 源码直启仍可换窗口图标，但不能改写项目环境的 python.exe。
+            return
+        command = [project_python(), "-u", "-m", "autodl_watcher.exe_icon", str(os.getpid()), str(executable)]  # 辅助任务读取最新源码。
+        subprocess.Popen(command, env=child_environment(self.folder.parent), close_fds=True,
+                         creationflags=subprocess.CREATE_NO_WINDOW)  # 等 GUI 安全退出后写资源，不占用其管道。
+        self.changed = False  # 仅在辅助进程成功创建后消费本次变更。
 
     def configure(self):
         return self.open_settings("icon")
@@ -154,7 +156,7 @@ class IconSettings(ttk.Frame):
         self.description.pack(fill="x", padx=12, pady=10)
         self.preview = ttk.Frame(self)
         self.preview.pack(fill="x", padx=12, pady=6)
-        ttk.Label(self, text="上方预览不代表Windows最终显示效果。\n窗口标题栏和运行中任务栏使用窗口图标；已固定的旧入口可能仍使用旧图标。\n磁盘EXE图标在安全关闭程序后同步；重新打开或刷新目录查看。\n快捷方式使用当前图标，更换后请重新导出；固定旧入口需重新固定新快捷方式。", wraplength=600).pack(fill="x", padx=12, pady=10)
+        ttk.Label(self, text="上方预览不代表Windows最终显示效果。\n窗口标题栏和运行中任务栏使用窗口图标；已固定的旧入口可能仍使用旧图标。\n从轻量启动器打开时，磁盘EXE图标在安全关闭后同步；源码直启仅更新窗口图标。\n快捷方式使用当前图标，更换后请重新导出；固定旧入口需重新固定新快捷方式。", wraplength=600).pack(fill="x", padx=12, pady=10)
         self.status = ttk.Label(self, wraplength=600)
         self.status.pack(fill="x", padx=12, pady=6)
         self.render()
@@ -179,7 +181,9 @@ class IconSettings(ttk.Frame):
         try:
             self.manager.import_file(path)
             self.render()
-            self.status.configure(text="已设置窗口图标；EXE图标在关闭程序后同步，请刷新目录。", foreground="#245c45")
+            message = ("已设置窗口图标；启动器图标在关闭程序后同步，请刷新目录。"
+                       if os.environ.get("AUTODL_LAUNCHER_EXE") else "已设置窗口图标；从轻量启动器打开后可同步其EXE图标。")  # 不承诺修改未选定的旧成品。
+            self.status.configure(text=message, foreground="#245c45")
         except (OSError, ValueError, tk.TclError) as exc:
             self.status.configure(text=f"图标未应用：{exc}", foreground="#b42318")
 
@@ -196,8 +200,17 @@ class IconSettings(ttk.Frame):
         if not path:
             return
         try:
-            executable = self.manager.folder.parent / "AutoDLWatcher.exe"
-            save_shortcut(Path(path), executable, self.manager.path or executable)
+            executable = launcher_target(os.environ.get("AUTODL_LAUNCHER_EXE"))  # 沿用当前明确入口，不命中根目录的旧完整成品。
+            if executable is None:
+                raise ValueError("当前为源码启动；请从轻量启动器打开应用后再导出快捷方式。")  # 不创建会运行旧业务代码的入口。
+            environment = os.environ.get("AUTODL_CONDA_ENV") or os.environ.get("CONDA_DEFAULT_ENV", "")  # 保留启动器已选环境名。
+            manager = os.environ.get("AUTODL_CONDA_EXE") or os.environ.get("CONDA_EXE", "")  # 使用启动时的管理器，不搜索全局命令。
+            conda = Path(manager) if manager else None
+            if (environment.lower() in {"", "base", "root"} or conda is None
+                    or not conda.is_absolute() or not conda.is_file()):
+                raise ValueError("未识别专用Conda环境或管理器；请从Conda轻量启动器打开应用后再导出快捷方式。")  # 不生成回退到base的入口。
+            save_shortcut(Path(path), executable, self.manager.path or executable,
+                          arguments=["--env", environment, "--conda", str(conda)])  # 快捷方式完整保留Conda环境和管理器选择。
             self.status.configure(text="快捷方式已写入；请从所选位置确认图标。", foreground="#245c45")
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             self.status.configure(text=str(exc), foreground="#b42318")

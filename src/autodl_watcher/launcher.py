@@ -1,14 +1,96 @@
-"""源码脚本、安装入口和冻结 EXE 共用的启动边界。"""
+"""源码GUI、CLI和同一Conda环境后台任务共用的启动边界。"""
 from __future__ import annotations
 
 import ctypes
+from importlib import import_module
+import importlib.metadata
+import json
+import re
 from pathlib import Path
 import os
+import site
 import sys
 import traceback
 
 from . import __version__
-from .paths import application_root, prepare_application
+from .paths import application_root, prepare_application, source_root
+
+
+def project_python() -> str:
+    """后台始终使用当前项目Conda中的控制台解释器，以保留日志和输入管道。"""
+    executable = Path(sys.executable)
+    if executable.name.lower() == "pythonw.exe":
+        executable = executable.with_name("python.exe")  # 只换同目录程序，不从PATH寻找另一个环境。
+    if not executable.is_file():
+        raise FileNotFoundError(f"项目解释器不存在：{executable}；请按README修复专用Conda环境")
+    return str(executable)
+
+
+def child_environment(root: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)  # 防止继承全局Python的标准库位置。
+    env.pop("PYTHONPATH", None)
+    checkout = source_root()
+    if checkout is not None:
+        env["PYTHONPATH"] = str(checkout / "src")  # 仅增加当前源码，不带入其它项目的路径。
+    env["AUTODL_APP_ROOT"] = str(root if root is not None else application_root())
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
+def check_environment() -> dict:
+    """检查conda run实际选择的环境和依赖来源，不安装或修改任何配置。"""
+    prefix = Path(sys.prefix).resolve()
+    active = os.environ.get("CONDA_PREFIX", "")
+    name = os.environ.get("CONDA_DEFAULT_ENV", "")
+    hint = "请按README使用 conda run -n <项目环境> --no-capture-output python -s 启动，并在同环境执行 pip install --no-user -e ."
+    if (not active or Path(active).resolve() != prefix or not (prefix / "conda-meta").is_dir()
+            or name.lower() in {"", "base", "root"} or sys.prefix != sys.base_prefix):
+        raise RuntimeError("需要专用Conda环境，不支持base、全局Python或venv。" + hint)
+    manager = os.environ.get("CONDA_EXE", "")
+    if manager and Path(manager).resolve().parent.parent == prefix:
+        raise RuntimeError("当前解释器属于Conda base。" + hint)
+    expected = os.environ.get("AUTODL_CONDA_ENV")
+    if expected and expected != name:
+        raise RuntimeError(f"Conda实际环境与指定环境不一致：{name} / {expected}。" + hint)
+    if sys.version_info < (3, 10):
+        raise RuntimeError("项目需要Python 3.10及以上，建议3.11。" + hint)
+    try:
+        requirements = importlib.metadata.requires("autodl-gpu-watcher") or []
+    except importlib.metadata.PackageNotFoundError:
+        raise RuntimeError("当前项目尚未安装。" + hint) from None
+    dependencies = {}
+    for requirement in requirements:
+        if "extra ==" in requirement:
+            continue  # 可选构建工具不属于应用运行所需依赖。
+        match = re.match(r"[A-Za-z0-9_.-]+", requirement)
+        if match is None:
+            continue
+        package = match.group()
+        try:
+            distribution = importlib.metadata.distribution(package)
+        except importlib.metadata.PackageNotFoundError:
+            raise RuntimeError(f"项目环境缺少依赖：{package}。" + hint) from None
+        location = Path(distribution.locate_file("")).resolve()
+        if not location.is_relative_to(prefix):
+            raise RuntimeError(f"依赖{package}来自项目环境之外：{location}。" + hint)
+        module_name = {"PyYAML": "yaml", "python-dotenv": "dotenv", "Pillow": "PIL"}.get(
+            package, package.replace("-", "_"))  # 仅转换发行名；依赖清单仍读取 pyproject 的安装元数据。
+        try:
+            module = import_module(module_name)  # 检查实际导入，避免正确元数据掩盖其他目录中的同名模块。
+        except (ImportError, OSError) as exc:
+            raise RuntimeError(f"无法导入依赖{package}：{exc}。" + hint) from exc
+        origin = getattr(module, "__file__", None)
+        module_paths = [Path(origin).resolve()] if origin else [
+            Path(item).resolve() for item in getattr(module, "__path__", ())]  # 命名空间包检查每个搜索目录。
+        if not module_paths or any(not item.is_relative_to(prefix) for item in module_paths):
+            raise RuntimeError(f"依赖{package}实际导入来自项目环境之外或无法定位：{module_paths}。" + hint)
+        dependencies[package] = {"version": distribution.version, "location": str(location),
+                                 "module_paths": [str(item) for item in module_paths]}
+    return {"environment": name, "prefix": str(prefix), "python": project_python(),
+            "source_root": str(source_root() or Path(__file__).resolve().parent),
+            "user_site_enabled": site.ENABLE_USER_SITE, "dependencies": dependencies}
 
 
 def _version() -> bool:
@@ -20,6 +102,13 @@ def _version() -> bool:
 
 def gui_main(*, root: Path | None = None) -> None:
     """延迟加载 Tk；pythonw 启动异常仍写日志并给出可操作说明。"""
+    if "--check-environment" in sys.argv[1:]:
+        try:
+            print(json.dumps(check_environment(), ensure_ascii=False))
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from None
+        return
     if _version():
         return
     root = Path(root) if root is not None else application_root()
@@ -27,6 +116,7 @@ def gui_main(*, root: Path | None = None) -> None:
     streams = sys.stdout, sys.stderr
     previous_root = os.environ.get("AUTODL_APP_ROOT")
     try:
+        check_environment()  # GUI启动前检查，错误沿用现有日志和窗口提示。
         root = prepare_application(root)
         log_path.parent.mkdir(exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
@@ -61,28 +151,7 @@ def gui_main(*, root: Path | None = None) -> None:
 def monitor_main() -> None:
     if _version():
         return
+    check_environment()
     prepare_application()
     from .main import main
     main()
-
-
-def worker_main() -> None:
-    """后台任务使用同一安装包与资料根；不另起调度循环。"""
-    root = prepare_application()
-    os.environ["AUTODL_APP_ROOT"] = str(root)
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", line_buffering=True, write_through=True)
-    task, *args = sys.argv[1:]
-    sys.argv = [sys.argv[0], *args]
-    if task == "monitor":
-        from .main import main as run
-    elif task == "discover":
-        from .gui import discover as run
-    elif task == "login":
-        from .login import main as run
-    elif task == "icon":
-        from .exe_icon import main as run
-    else:
-        raise ValueError(f"Unknown worker task: {task}")
-    run()

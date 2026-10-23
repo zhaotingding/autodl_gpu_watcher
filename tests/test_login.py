@@ -295,7 +295,7 @@ class PowerShellPathTest(unittest.TestCase):
         from autodl_watcher.login import edge_process_command_lines, terminate_profile_edge_processes
         expected = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
         with patch("autodl_watcher.login.subprocess.run") as run:
-            run.return_value.returncode, run.return_value.stdout = 0, ""
+            run.return_value.returncode, run.return_value.stdout = 0, b""
             edge_process_command_lines(Path("unused-profile"))
             terminate_profile_edge_processes(Path("unused-profile"))
         self.assertEqual(run.call_count, 2)
@@ -331,6 +331,61 @@ class PowerShellPathTest(unittest.TestCase):
         self.assertNotIn('"status": "invalid"', output.getvalue())
         self.assertNotIn("网络", output.getvalue())
         factory.assert_not_called()
+
+
+@unittest.skipUnless(os.name == "nt", "Windows PowerShell 编码边界")
+class PowerShellEncodingTest(unittest.TestCase):
+    def test_unicode_profile_and_diagnostics_round_trip_without_reader_thread_crash(self):
+        import threading
+        from autodl_watcher import login
+        profile = Path("C:/测试 用户/O'Connor/训练🚀/native_login_profile")
+        line = f'msedge.exe --user-data-dir="{profile}" --new-window'
+        original = login._edge_process_query_script
+        def script(path, **kwargs):
+            # 只在独立PowerShell中提供合成进程，不查询或操作用户浏览器。
+            fixture = ("function Get-CimInstance { [Console]::Error.WriteLine('中文诊断：仅测试'); "
+                       "[pscustomobject]@{Name='msedge.exe'; CommandLine='" + login._ps_quote(line) + "'} }; ")
+            return fixture + original(path, **kwargs)
+        errors = []
+        with patch.object(login, "_edge_process_query_script", side_effect=script), \
+             patch.object(threading, "excepthook", side_effect=lambda event: errors.append(event.exc_value)):
+            try:
+                self.assertEqual(login.edge_process_command_lines(profile), [line])
+            finally:
+                self.assertEqual(errors, [], "子进程读取线程不应自行崩溃")
+
+    def test_localized_close_error_is_reported_without_reader_thread_crash(self):
+        import threading
+        from autodl_watcher import login
+        original = login._edge_process_query_script
+        def script(path, **kwargs):
+            # 合成CIM错误直接返回非零；不会调用真实CloseMainWindow。
+            return "function Get-CimInstance { throw '查询失败：仅测试'; }; " + original(path, **kwargs)
+        errors = []
+        with patch.object(login, "_edge_process_query_script", side_effect=script), \
+             patch.object(threading, "excepthook", side_effect=lambda event: errors.append(event.exc_value)):
+            with self.assertRaises(login.LocalStartupError):
+                login.close_profile_edge_windows(Path("unused-profile"))
+        self.assertEqual(errors, [], "中文错误也必须安全交回调用线程")
+
+    def test_undecodable_process_query_preserves_both_profiles(self):
+        import subprocess
+        from autodl_watcher import login
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory)/"source", Path(directory)/"target"
+            source.mkdir(); target.mkdir()
+            (source/"Cookies").write_bytes(b"new-auth-test-data")
+            (target/"Cookies").write_bytes(b"previous-auth-test-data")
+            result = subprocess.CompletedProcess([], 0, stdout=b"\xd3", stderr=b"")
+            with patch.object(login, "close_profile_edge_windows"), \
+                 patch.object(login.subprocess, "run", return_value=result), \
+                 patch.object(login, "remove_stale_profile_locks") as remove, \
+                 patch.object(login.shutil, "copytree") as copy:
+                with self.assertRaises(login.LocalStartupError):
+                    login.sync_login_profile_to_browser(source, target)
+            remove.assert_not_called(); copy.assert_not_called()
+            self.assertEqual((source/"Cookies").read_bytes(), b"new-auth-test-data")
+            self.assertEqual((target/"Cookies").read_bytes(), b"previous-auth-test-data")
 
 
 if __name__ == "__main__":

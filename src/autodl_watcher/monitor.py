@@ -24,7 +24,7 @@ from .collectors import (
 )
 from .collectors.telemetry import TelemetryUnavailable
 from .collectors.platform import InstanceIdentityError
-from .config import AutoStartTarget
+from .config import AutoStartTarget, validate_telemetry_endpoint
 from .evaluator import AvailabilityEvaluator
 from .login import LocalStartupError, interactive_login
 from .notifiers import EmailNotifier
@@ -88,6 +88,7 @@ def _setup_logging(log_file: str) -> logging.Logger:  # 配置滚动日志文件
 def run_monitor(config, args, config_path, parser):  # 独立监控入口，保留 CLI 和 UI 共用的业务链路。
 
     try:
+        validate_telemetry_endpoint(config.telemetry.endpoint)  # 创建浏览器、日志和电源协调器之前拒绝缺失配置。
         selected_host = normalize_host(args.host)       # "203" → "gpu-203"
         selected_entry = normalize_entry(args.entry, selected_host)  # "auto" / "2" / "203-2"
         try:

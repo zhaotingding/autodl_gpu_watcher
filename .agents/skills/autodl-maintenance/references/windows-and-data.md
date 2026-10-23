@@ -7,10 +7,16 @@
 - 应用设置使用`.ui/*.yaml`；yaml_settings仅兼容读取旧JSON，新保存写YAML、同名YAML优先，损坏YAML不回退旧内容。多行提示词保持原文，规则身份字符串不变，API密钥仍由Windows凭据管理器保存。
 - 协议/运行状态JSON和SQL账本不转YAML，pyproject.toml、编辑器及Git文件保留工具要求的格式。不要为了“统一格式”改变存储语义。
 - source_root是代码根，application_root是资料根。AUTODL_APP_ROOT只改资料位置，源码worker的PYTHONPATH来自已验证代码根；wheel使用用户资料目录，不写site-packages。
-- config.local.yaml优先，仓库config.yaml和包内defaults.yaml是无个人端点/实例的安全示例。只初始化缺失文件，不能用旧EXE把安全示例误当作维护者原配置。
+- config.local.yaml存在时整份采用，不与config.yaml逐字段合并；仓库config.yaml和包内defaults.yaml是无个人端点/实例的安全示例。只初始化缺失文件，不能用旧EXE把安全示例误当作维护者原配置。
 - 默认仅监控，旧偏好缺电源字段也按关闭；用户名、间隔和电源选项正常模式重开恢复，debug模式强制关闭。仅监控传--monitor-only，不用--dry-run冒充关闭电源规划。监控中保存对下次开始生效，打开程序只读核验会话，监控需手动开始。
 
 证据：v0.9.0.2电源偏好与仅监控模拟/隔离Tk，`v0902/full-tests.txt`、`ui-report.json`和restart-settings.png；2026-10-13YAML实际关闭后迁移及重开，外部归档`2026-10-13-yaml-settings/`保留verification.yaml、migration.yaml及图证；2026-10-14/15安装和GUI验收见仓库[重构验收记录](../../../../docs/重构验收记录.md)。业务回归入口为test_yaml_settings.py、test_gui_window.py、test_portable_startup.py。
+
+2026-10-20 源码核对补充（非新安装实测）：GUI 的 `.ui/preferences.yaml` 覆盖用户/间隔/入口和电源偏好，保存不改写基础 YAML；直接 CLI 不读取该偏好，应显式使用 `--monitor-only`。恢复旧 `.ui/ai.yaml` 可能恢复自动规则生成；开始训练监控、发现新任务时可能计费，debug 不关闭此项。新配置默认关闭不能用于推断旧配置。
+
+同日配置边界回归：空或无效 `telemetry.endpoint` 在功能入口显示“Telemetry 待配置”，不发 Telemetry 请求、不进入网络退避或电源初始化。配置加载仍接受空值以供新用户打开 GUI 和配置 SSH；手动平台发现可以保留已验证会话及主机列表，同时将 GPU 标为待配置。证据为 `test_telemetry_recovery.py`、`test_gui.py`、`test_first_start.py` 的隔离模拟通过，未执行真实平台验收。`Invalid URL` 不能直接归因为 TCP 积压或暴力扫描。
+
+升级保留 `config.local.yaml`、`.ui/`（尤其 `training_rules.yaml`、`ai_usage.sqlite3` 与图标）、`runtime/`、可选 `.env`。数据库备份须由用户在写入者停止后进行，或使用一致性快照；正在写入时直接复制单个 SQLite 文件不构成可靠备份。Windows 凭据不随 YAML 恢复，账号/电脑或 API 地址变化需重配；浏览器资料复制不等于会话有效，绝对路径和 SSH 密钥引用需另核对。源代码更新不主动搬动这些资料，未知停止文件保留。恢复实际结果由用户确认，不能以路径存在或文件哈希不变冒充业务恢复成功。
 
 ## 历史证据定位
 

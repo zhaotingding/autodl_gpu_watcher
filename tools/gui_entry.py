@@ -1,4 +1,4 @@
-"""保留双击和 PyInstaller 脚本入口；启动逻辑统一在包内。"""
+"""轻量启动器调用的源码入口；启动逻辑统一在包内。"""
 import os
 from pathlib import Path
 import sys
@@ -11,11 +11,7 @@ def main():
     from autodl_watcher.launcher import gui_main
     root = None if getattr(sys, "frozen", False) else Path(
         os.environ.get("AUTODL_APP_ROOT", Path(__file__).resolve().parents[1]))
-    try:
-        gui_main(root=root)
-    except SystemExit as exc:
-        if exc.code != 1:
-            raise  # 脚本兼容原来的弹窗错误路径；安装命令仍返回失败状态。
+    gui_main(root=root)  # 保留失败退出码，供轻量启动器报告环境或启动错误。
 
 
 if __name__ == "__main__":

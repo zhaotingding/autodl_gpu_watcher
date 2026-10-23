@@ -67,6 +67,8 @@ def _edge_process_query_script(user_data_dir: Path, *, kill: bool, close_windows
         action = ("ForEach-Object { $edge = Get-Process -Id $PSItem.ProcessId "
                   "-ErrorAction SilentlyContinue; if ($edge) { $null = $edge.CloseMainWindow() } }")
     return (
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [Console]::OutputEncoding; "  # 明确管道编码，不依赖Windows中文代码页。
         "$p='" + marker + "'; "
         "Get-CimInstance Win32_Process -ErrorAction Stop | "
         "Where-Object { $PSItem.Name -eq 'msedge.exe' -and "
@@ -100,13 +102,16 @@ def edge_process_command_lines(user_data_dir: Path) -> list[str]:  # 读取使�
             _edge_process_query_script(user_data_dir, kill=False),
         ],
         capture_output=True,  # 辅助进程输出交给 Python 读取，不单独弹终端供用户查看。
-        text=True,
-        check=False,
+        check=False,  # 先接收字节；解码异常必须在调用线程处理，不能让读取线程自行崩溃。
         creationflags=subprocess.CREATE_NO_WINDOW,  # 只隐藏 PowerShell 辅助进程，人工登录的 Edge 窗口仍然可见。
     )
     if completed.returncode != 0:
         raise LocalStartupError("无法查询专用 Edge 进程，已停止登录资料同步；请重试")  # 查询失败不能当成浏览器已经退出。
-    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    try:
+        output = completed.stdout.decode("utf-8")  # 与PowerShell输出约定一致，完整保留中文路径。
+    except UnicodeDecodeError as exc:
+        raise LocalStartupError("专用 Edge 进程查询输出编码异常，已停止登录资料同步；请重试") from exc
+    return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 def terminate_profile_edge_processes(user_data_dir: Path) -> None:  # 静默关闭仅使用指定专用 profile 的 Edge 进程。
@@ -135,7 +140,7 @@ def close_profile_edge_windows(user_data_dir: Path) -> None:  # 用户确认登�
     completed = subprocess.run(
         [_powershell_executable(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-Command", _edge_process_query_script(user_data_dir, kill=False, close_windows=True)],
-        capture_output=True, text=True, check=False,
+        capture_output=True, check=False,  # 正常关窗仅看退出码，中文错误输出按字节接收。
         creationflags=subprocess.CREATE_NO_WINDOW,  # 辅助进程隐藏，正常关窗交给Edge自身处理。
     )
     if completed.returncode != 0:

@@ -3,6 +3,7 @@ from __future__ import annotations  # 配置加载模块 — 解析 config.yaml�
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -51,6 +52,23 @@ class TelemetryConfig:  # Telemetry API 采集器配置（HTTP GET 拉取 GPU �
     max_attempts: int          # 单轮最多请求次数（含第一次）
     retry_delay_seconds: float # 两次请求之间等待秒数
     only_online: bool          # 是否只接受 host_status=online 的样本
+
+
+def validate_telemetry_endpoint(endpoint: str) -> str:
+    """仅在使用 Telemetry 功能时校验地址；允许未配置的程序正常打开和使用 SSH。"""
+    address = endpoint.strip()
+    message = ("Telemetry 待配置：请在当前配置文件中设置 telemetry.endpoint，"
+               "使用包含主机名的 http:// 或 https:// 地址；本次未发送 Telemetry 请求。")
+    try:
+        parts = urlsplit(address)
+        valid = (parts.scheme in {"http", "https"} and bool(parts.hostname)
+                 and not any(char.isspace() or ord(char) < 32 for char in address))
+        parts.port  # 读取时校验端口格式及范围，不连接服务器。
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(message)  # 不回显可能含认证信息的原始地址。
+    return address
 
 
 @dataclass(frozen=True, slots=True)

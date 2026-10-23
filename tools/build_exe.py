@@ -1,6 +1,4 @@
 from pathlib import Path
-import os
-import shutil
 import subprocess
 import sys
 
@@ -8,10 +6,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main(stage_only=False, icon=None):  # 只收集应用代码和依赖，绝不把 runtime、.ui 或 .env 加入发行包。
+def main(stage_only=False, icon=None):  # 保留旧参数兼容；所有构建现在都仅暂存，不自动安装。
+    sys.path.insert(0, str(ROOT / "src"))
+    from autodl_watcher.launcher import check_environment, child_environment
+    check_environment()  # 构建同样限定项目Conda环境；不借用用户级依赖。
     folder = ROOT / ".tools" / "build"
     folder.mkdir(parents=True, exist_ok=True)
-    spec = folder / "AutoDLWatcher.spec"
     icon_path = None
     if icon:
         sys.path.insert(0, str(ROOT / "src"))
@@ -33,50 +33,22 @@ def main(stage_only=False, icon=None):  # 只收集应用代码和依赖，绝�
             StringStruct('ProductVersion', '{__version__}')])]),
             VarFileInfo([VarStruct('Translation', [2052, 1200])])])
 """, encoding="utf-8")
-    library_bin = Path(sys.prefix) / "Library" / "bin"
-    binaries = [(str(library_bin / name), ".") for name in
-                ("libssl-3-x64.dll", "libcrypto-3-x64.dll") if (library_bin / name).is_file()]
-    datas = [(str(ROOT / "src/autodl_watcher/remote_probe.py"), "autodl_watcher"),
-             (str(ROOT / "src/autodl_watcher/default.ico"), "autodl_watcher"),
-             (str(ROOT / "src/autodl_watcher/defaults.yaml"), "autodl_watcher")]  # SSH仅发送这份只读标准库探针。
-    env = os.environ.copy()
-    if library_bin.is_dir():
-        env["PATH"] = str(library_bin) + os.pathsep + env.get("PATH", "")  # Conda DLL 必须与打包解释器一致。
-    spec.write_text(f"""a = Analysis(
-    [{str(ROOT / 'tools/gui_entry.py')!r}, {str(ROOT / 'tools/worker_entry.py')!r}],
-    pathex=[{str(ROOT / 'src')!r}], binaries={binaries!r}, datas={datas!r}, hiddenimports=[],
-    hookspath=[], hooksconfig={{}}, runtime_hooks=[], excludes=[])
-pyz = PYZ(a.pure)
-gui = EXE(pyz, a.scripts[:-2] + [a.scripts[-2]], [], exclude_binaries=True,
-    name='AutoDLWatcher', debug=False, strip=False, upx=False, console=False,
-    contents_directory='_internal', icon={str(icon_path) if icon_path else None!r},
-    version={str(version_path)!r})
-worker = EXE(pyz, a.scripts[:-2] + [a.scripts[-1]], [], exclude_binaries=True,
-    name='AutoDLWorker', debug=False, strip=False, upx=False, console=True,
-    contents_directory='.')
-COLLECT(gui, a.binaries, a.datas, [('AutoDLWorker.exe', worker.name, 'BINARY')],
-    strip=False, upx=False, name='AutoDLWatcher')
-""", encoding="utf-8")
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm",
-                    "--distpath", str(folder / "release"), "--workpath", str(folder / "work"),
-                    str(spec)], cwd=ROOT, env=env, check=True)
-    release = ROOT  # 主程序直接放项目根目录，沿用已有配置和运行资料。
-    staged = folder / "release" / "AutoDLWatcher"
-    from importlib.resources import files
-    (staged / "config.yaml").write_bytes(files("autodl_watcher").joinpath("defaults.yaml").read_bytes())
-    if stage_only:
-        print(f"暂存构建：{staged}")
-        return staged  # 验证通过后才替换正在使用的主程序。
-    shutil.copyfile(staged / "AutoDLWatcher.exe", release / "AutoDLWatcher.exe")
-    shutil.copytree(staged / "_internal", release / "_internal", dirs_exist_ok=True)  # 只合并生成依赖，保留用户配置、登录资料与日志。
-    print(f"GUI: {release / 'AutoDLWatcher.exe'}")
-    print(f"Worker: {release / '_internal' / 'AutoDLWorker.exe'}")
+    staged = folder / "launcher"
+    command = [sys.executable, "-s", "-m", "PyInstaller", "--noconfirm", "--clean",
+               "--onefile", "--noconsole", "--noupx", "--name", "AutoDLWatcher",
+               "--distpath", str(staged), "--workpath", str(folder / "launcher-work"),
+               "--specpath", str(folder), "--version-file", str(version_path),
+               "--icon", str(icon_path or ROOT / "src/autodl_watcher/default.ico"),
+               str(ROOT / "tools/launcher_entry.py")]
+    subprocess.run(command, cwd=ROOT, env=child_environment(ROOT), check=True)
+    print(f"轻量启动器暂存：{staged / 'AutoDLWatcher.exe'}；验收后再复制到仓库根目录。")
+    return staged  # 不覆盖正在运行的旧程序、旧_internal或任何个人数据。
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage-only", action="store_true", help="仅生成暂存发行包，保留正在运行的版本")
-    parser.add_argument("--icon", help="将所选ICO/PNG嵌入GUI的EXE资源；ICO原样保留")
+    parser.add_argument("--stage-only", action="store_true", help="兼容旧调用；现在始终只生成暂存启动器")
+    parser.add_argument("--icon", help="将所选ICO/PNG嵌入启动器EXE资源；ICO原样保留")
     args = parser.parse_args()
     main(stage_only=args.stage_only, icon=args.icon)

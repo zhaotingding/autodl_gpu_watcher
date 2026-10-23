@@ -17,34 +17,28 @@ from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
+from .launcher import child_environment, project_python as worker_python
 from .app_icon import IconManager
 from .cli import normalize_host, positive_seconds
-from .config import load_config
+from .config import load_config, validate_telemetry_endpoint
 from .login import LocalStartupError
 from .training_config import TrainingServer, load_servers, save_servers  # GUI 只读取训练配置边界，不加载解析聚合模块。
 from .training_ui import TrainingPane
 from .training_service import TrainingService
 from .training_ai_ui import AIAssistant
 from .session import GPU_PREFIX, REPORT_PREFIX, SESSION_PREFIX, emit_gpu_samples, emit_session
-from .paths import application_root, default_config_path, prepare_application, source_root
+from .paths import application_root, default_config_path, prepare_application
 from .yaml_settings import read_settings, settings_source, write_settings
 
 ROOT = application_root()  # 所有启动入口共用源码/安装包/成品布局规则。
 DATA_PREFIX = "WATCHER_HOSTS "  # 约定的结构化输出前缀；主机列表与普通日志共用 stdout 管道。
 
 
-def worker_python():  # GUI 用 pythonw，后台任务用带管道且无窗口的 python，保证日志和登录输入可用。
-    executable = Path(sys.executable)  # 获取当前 GUI 所属环境，后台任务必须使用同一环境的依赖。
-    return str(executable.with_name("python.exe")) if executable.name.lower() == "pythonw.exe" else sys.executable
-
-
-def worker_command(task, *args):  # 源码使用当前 Python；发布版使用共享依赖目录中的无窗口后台程序。
+def worker_command(task, *args):  # 主程序始终运行源码，后台复用同一个Conda解释器。
     modules = {"monitor": "autodl_watcher.main", "discover": "autodl_watcher.gui",
                "login": "autodl_watcher.login"}
     module = modules[task]  # 仅允许这三个应用任务，不执行任意模块。
-    if getattr(sys, "frozen", False):
-        return [str(ROOT / "_internal" / "AutoDLWorker.exe"), task, *args]
-    return [worker_python(), "-u", "-m", module, *(["--discover"] if task == "discover" else []), *args]
+    return [worker_python(), "-s", "-u", "-m", module, *(["--discover"] if task == "discover" else []), *args]
 
 
 def log_tag(line):  # 配置说明不是故障；实际失败优先于同一行的成功或占用信息。
@@ -65,6 +59,7 @@ def log_tag(line):  # 配置说明不是故障；实际失败优先于同一行�
 
 
 def monitor_command(config, entry, user, poll, live, stop_file, convert_no_gpu=False):  # 构造与 CLI 相同的监控命令。
+    validate_telemetry_endpoint(config.telemetry.endpoint)
     if not entry:  # 没选入口就拒绝启动，避免误用命令行默认主机。
         raise ValueError("请先选择服务器入口")
     if not user.strip():  # 此名称用于占用归属匹配，不是登录账号或 SSH 用户名。
@@ -137,11 +132,13 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self._populate([(item.machine_name, "待刷新", "未核验")
                         for item in self.config.auto_start.targets if item.enabled])
         self.root.after(100, self._drain)  # 将首次消息处理排入 Tk 事件队列，而不是阻塞等待后台输出。
-        if self.config.telemetry.endpoint.strip():
-            self.root.after(0, self.refresh)  # 已配置平台仍沿用启动时只读核验。
-        else:
+        try:
+            validate_telemetry_endpoint(self.config.telemetry.endpoint)
+        except ValueError as exc:
             self.session_text.set("AutoDL 尚未配置 · 可先在全局设置中添加自己的 SSH 服务器")
-            self.status.set("欢迎使用 · 配置服务器后点击开始监控")
+            self.status.set(str(exc))
+        else:
+            self.root.after(0, self.refresh)  # 已配置平台仍沿用启动时只读核验。
         self.root.protocol("WM_DELETE_WINDOW", self.close)  # 标题栏关闭按钮也走安全停止流程。
 
     def _build(self):  # 从上到下构建工具栏、服务器表、配置区、操作按钮和日志区。
@@ -424,12 +421,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
     def _launch(self, command, job):  # 为所有任务建立相同的环境、日志管道和退出通知。
         if self.process is not None:  # 禁止同一窗口重复启动任务，避免同时占用浏览器资料。
             return
-        env = os.environ.copy()
-        checkout = source_root()  # 资料可在独立目录，子进程仍加载同一份源码。
-        if checkout is not None:
-            env["PYTHONPATH"] = str(checkout / "src") + os.pathsep + env.get("PYTHONPATH", "")
-        env["AUTODL_APP_ROOT"] = str(ROOT)  # 后台 EXE 位于依赖目录，配置与运行数据仍归属于应用根目录。
-        env["PYTHONUTF8"] = "1"  # 子进程日志使用 UTF-8，与读取管道时的解码一致。
+        env = child_environment(ROOT)  # 所有后台任务共用项目环境和资料位置。
         try:
             self.process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",  # 错误输出也进入底部日志；stdin 管道用于确认人工登录。
@@ -643,6 +635,12 @@ def discover():  # 子进程模式：采集结果编码为一行 JSON，供父�
         print(DATA_PREFIX + json.dumps(rows, ensure_ascii=False), flush=True)
         emit_session("valid", "主机接口核验成功")
         if hosts:
+            try:
+                validate_telemetry_endpoint(config.telemetry.endpoint)
+            except ValueError as exc:
+                emit_gpu_samples([], hosts, config.monitor.stale_after_seconds, str(exc))
+                print(str(exc), flush=True)
+                return  # 平台发现仍成功；缺少GPU数据不能把已确认的登录会话判为失效。
             telemetry = TelemetryApiCollector(config.telemetry)
             try:
                 emit_gpu_samples(telemetry.collect(), hosts, config.monitor.stale_after_seconds)

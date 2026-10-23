@@ -17,3 +17,6 @@ dist/
 
 # 当前机器的基础配置；仓库 config.yaml 只提供安全示例。
 /config.local.yaml
+
+# 本机编辑器偏好；保留文件，不纳入 Git。
+/.vscode/settings.json
