@@ -1,46 +1,52 @@
-name: Offline checks
-on: [push, pull_request]
-jobs:
-  windows:
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        python: ['3.10', '3.12']
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      PYTHONNOUSERSITE: '1'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v4
-        with:
-          activate-environment: auto-gpu
-          python-version: ${{ matrix.python }}
-          auto-activate: false
-          channels: conda-forge
-          add-pip-as-python-dependency: true
-      - name: Install editable source in the project Conda environment
+# 此工作流在 GitHub 云端运行，使用临时环境和测试资料。
+# 通用参数：--no-capture-output 实时输出；python -s 禁用用户级包目录；-m 运行指定 Python 模块。
+name: Offline checks  # 工作流名称：离线自动检查，显示在 GitHub 的 Actions 页面。
+on: [push, pull_request]  # 推送提交或更新拉取请求（PR）时，自动运行下面的检查。
+jobs:  # 定义需要执行的任务。
+  windows:  # Windows 检查任务的标识。
+    runs-on: windows-latest  # 在 GitHub 提供的 Windows 云端机器上运行。
+    strategy:  # 定义任务如何按不同配置展开。
+      matrix:  # 测试矩阵：为列表中的每个 Python 版本独立运行一份任务。
+        python: ['3.10', '3.12']  # 当前要检查的 Python 版本。
+    defaults:  # 下面各步骤共用的默认设置。
+      run:  # 这些默认设置作用于执行命令的步骤。
+        shell: pwsh  # 使用 PowerShell 7 执行命令。
+    env:  # 为本任务的各步骤设置环境变量。
+      PYTHONNOUSERSITE: '1'  # 禁用用户级 Python 包目录，避免混入项目环境外的依赖。
+    steps:  # 按顺序执行；前一步失败时，默认不再执行后续步骤。
+      - uses: actions/checkout@v4  # 将当前待检查的仓库源码取到云端工作目录。
+      - uses: conda-incubator/setup-miniconda@v4  # 准备 Miniconda 和项目独立环境。
+        with:  # 传给上面这个 Action 的配置。
+          activate-environment: auto-gpu  # 项目环境名称；后续安装和测试统一使用它。
+          python-version: ${{ matrix.python }}  # 使用当前这一份矩阵任务指定的 Python 版本。
+          auto-activate: false  # 后续不依赖终端自动激活，统一用 conda run -n 明确选环境。
+          channels: conda-forge  # Conda 下载软件包时使用的源。
+          add-pip-as-python-dependency: true  # 在新环境中准备 pip，供下方安装项目依赖。
+
+      - name: Install editable source in the project Conda environment  # 第一步：安装源码及其依赖。
+        run: |  # 下面缩进的各行作为同一段 PowerShell 脚本执行。
+          $PSNativeCommandUseErrorActionPreference = $true  # 让外部命令的非零退出码进入 PowerShell 错误处理。
+          conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user -e .  # 在项目环境安装；-e 关联当前源码，--no-user 禁止安装到用户包目录。
+          conda run -n auto-gpu --no-capture-output python -s -m pip check  # 检查已安装依赖是否缺失或版本冲突。
+
+      - name: Offline tests without personal settings  # 第二步：使用测试样本运行离线回归。
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user -e .
-          conda run -n auto-gpu --no-capture-output python -s -m pip check
-      - name: Offline tests without personal settings
+          $PSNativeCommandUseErrorActionPreference = $true  # 外部命令失败时交给 PowerShell 报错。
+          conda run -n auto-gpu --no-capture-output python -s -m unittest discover -s tests -q  # 自动发现 tests 目录中的用例；-q 精简输出，失败仍会显示详情。
+
+      - name: Build wheel  # 第三步：检查项目能否构建为标准 Python 安装包。
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          conda run -n auto-gpu --no-capture-output python -s -m unittest discover -s tests -q
-      - name: Build wheel
+          $PSNativeCommandUseErrorActionPreference = $true  # 构建命令失败时报告错误。
+          conda run -n auto-gpu --no-capture-output python -s -m pip wheel --no-deps . -w dist  # 只构建本项目的 wheel，放入 dist；不为依赖另行构建安装包。
+
+      - name: Replace editable install with wheel in the same project environment  # 第四步：验证安装包能独立使用，避免只在源码目录中运行成功。
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          conda run -n auto-gpu --no-capture-output python -s -m pip wheel --no-deps . -w dist
-      - name: Replace editable install with wheel in the same project environment
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          $wheelPath = (Get-ChildItem dist/autodl_gpu_watcher-*.whl | Select-Object -First 1).FullName
-          conda run -n auto-gpu --no-capture-output python -s -m pip uninstall -y autodl-gpu-watcher
-          conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user $wheelPath
-          $env:AUTODL_APP_ROOT = "$env:RUNNER_TEMP/wheel-data"
-          Set-Location $env:RUNNER_TEMP
-          conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher --version
-          conda run -n auto-gpu --no-capture-output python -s -c "import sys; from pathlib import Path; import autodl_watcher; assert Path(autodl_watcher.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()); from autodl_watcher.paths import prepare_application, default_config_path; from autodl_watcher.config import load_config; prepare_application(); c=load_config(default_config_path()); assert not c.auto_start.enabled and not c.auto_start.targets"
-          conda run -n auto-gpu --no-capture-output python -s -m pip check
+          $PSNativeCommandUseErrorActionPreference = $true  # 安装或检查命令失败时报告错误。
+          $wheelPath = (Get-ChildItem dist/autodl_gpu_watcher-*.whl | Select-Object -First 1).FullName  # 取得刚构建的本项目 wheel 的完整路径。
+          conda run -n auto-gpu --no-capture-output python -s -m pip uninstall -y autodl-gpu-watcher  # 仅在云端测试环境卸载源码关联，防止它掩盖安装包缺失的内容。
+          conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user $wheelPath  # 在同一个项目环境安装 wheel，不另建环境。
+          $env:AUTODL_APP_ROOT = "$env:RUNNER_TEMP/wheel-data"  # 将测试配置和数据放入云端临时目录。
+          Set-Location $env:RUNNER_TEMP  # 离开源码目录，检查是否真正使用环境中安装的包。
+          conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher --version  # 确认安装后的包可以导入并输出版本。
+          conda run -n auto-gpu --no-capture-output python -s -c "import sys; from pathlib import Path; import autodl_watcher; assert Path(autodl_watcher.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()); from autodl_watcher.paths import prepare_application, default_config_path; from autodl_watcher.config import load_config; prepare_application(); c=load_config(default_config_path()); assert not c.auto_start.enabled and not c.auto_start.targets"  # 核对包来自所选环境，并确认初始化后的默认配置关闭自动开机、没有预设实例。
+          conda run -n auto-gpu --no-capture-output python -s -m pip check  # 再次检查安装 wheel 后的依赖完整性。
