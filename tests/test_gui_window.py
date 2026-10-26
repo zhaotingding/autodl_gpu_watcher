@@ -58,6 +58,33 @@ class GuiWindowTest(unittest.TestCase):
         self.assertEqual(len([c for c in self.root.winfo_children() if isinstance(c, tk.Toplevel)]), 1)
         self.assertIn("Auto算力与训练调度", self.root.title())
 
+    def test_network_button_opens_global_single_panel_without_starting_business(self):
+        from autodl_watcher.network_monitor import NetworkSnapshot
+        self.assertEqual(self.window.network_button.cget("text"), "网络连接详情")
+        self.assertIs(self.window.network_button.master, self.window.settings_button.master)
+        self.assertIsNone(self.window.network_monitor)  # 未打开时不启动系统采样。
+        monitor = Mock()
+        monitor.poll.return_value = NetworkSnapshot(time.time(), (), (), 0.01)
+        self.window.network_monitor = monitor
+        with patch.object(self.window.training, "start") as training_start:
+            dialog = self.window.open_network()
+            dialog.automatic.set(False)
+            self.pump(lambda: dialog._snapshot is not None)
+            self.assertIs(dialog, self.window.open_network())
+            self.assertIsNone(self.window.process)
+            training_start.assert_not_called()
+            dialog.close()
+            self.assertEqual(dialog.state(), "withdrawn")
+            self.assertIs(dialog, self.window.open_network())
+        dialog.destroy()
+
+    def test_network_entry_does_not_overlap_settings_at_minimum_window_width(self):
+        self.root.geometry("820x660")
+        self.root.deiconify()
+        self.root.update()
+        left, right = self.window.network_button, self.window.settings_button
+        self.assertLessEqual(left.winfo_x() + left.winfo_width(), right.winfo_x())
+
     def test_ai_checkbox_uses_tick_indicator_and_keeps_opt_in_semantics(self):
         dialog=self.window.open_settings("ai")
         page=dialog.pages["ai"]

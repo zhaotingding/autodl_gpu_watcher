@@ -126,6 +126,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                 self.status.set("本地偏好读取失败，已使用默认配置")
         self.icons = IconManager(root, self.local)
         self.settings_window = None
+        self.network_window = self.network_monitor = None  # 连接详情按需创建，主窗口启动不增加系统轮询。
         self.training.ai.open_settings = self.open_settings
         self.icons.open_settings = self.open_settings
         self._build()
@@ -175,6 +176,10 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         style.configure("GlobalAI.TButton", padding=(7, 1))
         self.settings_button = ttk.Button(frame, text="全局设置", style="GlobalAI.TButton", command=self.open_settings)
         self.settings_button.place(relx=1, y=0, anchor="ne")
+        self.network_button = ttk.Button(frame, text="网络连接详情", style="GlobalAI.TButton", command=self.open_network)
+        self.network_button.place(relx=1, x=-self.settings_button.winfo_reqwidth() - 6, y=0, anchor="ne")
+        self.settings_button.bind("<Configure>", lambda event: self.network_button.place_configure(
+            x=-self.settings_button.winfo_reqwidth() - 6))  # 按实际按钮宽度避让，适配字体和 DPI。
         self.auto_page = ttk.Frame(self.notebook, padding=6)
         self.notebook.add(self.auto_page, text="AutoDL 平台")
         page = self.auto_page
@@ -277,6 +282,16 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         window.deiconify()
         window.lift()
         return window
+
+    def open_network(self):
+        from .network_monitor import NetworkMonitor
+        from .network_ui import NetworkPanel
+        if self.network_monitor is None:
+            self.network_monitor = NetworkMonitor()  # 后台只读取本机状态，不触发平台或 SSH 采样。
+        if self.network_window is None or not self.network_window.winfo_exists():
+            self.network_window = NetworkPanel(self.root, self.network_monitor)
+        self.network_window.show()  # 单窗口复用；关闭详情不会断开业务连接。
+        return self.network_window
 
     def edit_server(self, server_id=None, entry=""):  # 所有入口共用全局设置中的连接编辑表单。
         server = next((item for item in self.servers if item.id == server_id), None)
@@ -583,6 +598,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                     messagebox.showerror("EXE图标未同步", str(exc), parent=self.root)
                     return
             self.closing = True
+            if self.network_window is not None and self.network_window.winfo_exists():
+                self.network_window.destroy()  # 先取消详情窗口定时器，后台读表不阻塞正常收尾。
             self.training.ai.begin_shutdown()  # 停止接单并有界收尾，不自动重发收费请求。
             self.training.stop_all()
             self.stop()
