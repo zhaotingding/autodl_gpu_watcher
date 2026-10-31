@@ -41,6 +41,10 @@ class TrainingTracker:
                 primary, progress = None, deepcopy(previous["progress"]) if previous.get("progress") else parse_progress("")
             rule_status = "默认监控"
             entry = self.rule_lookup(dict(task, log_path=primary["path"] if primary else "")) if self.rule_lookup else None
+            if entry and entry.get("log_selected"):
+                chosen = next((pair for pair in parsed if pair[0]["path"] == entry.get("log_path")), None)
+                if chosen is not None:
+                    primary, progress = chosen  # 用户为此任务明确选定的日志，后续采样继续在同一来源应用规则。
             if entry:
                 rule_status = entry.get("message", "默认监控")
             if entry and entry.get("profile") and (not primary or entry.get("log_path") != primary["path"]):
@@ -106,6 +110,10 @@ class TrainingTracker:
             card = dict(task, progress=progress, level=level, status=status, marker=marker,
                         last_alive_at=now if alive else previous.get("last_alive_at"),
                         advanced_at=advanced_at, rule_status=rule_status, log_path=primary["path"] if primary else "",
+                        log_identity=primary.get("identity", "") if primary else "",
+                        log_size=primary.get("size") if primary else None,
+                        log_selected=bool(entry and entry.get("log_selected")),
+                        log_sources=[{key: log.get(key) for key in ("path", "identity", "size", "gap", "modified_at")} for log in logs],
                         details=(primary["tail"] if primary.get("gap") else primary["head"] + primary["tail"]) if primary else "")
             if primary:
                 preview = ANSI_ESCAPE.sub("", card["details"]).replace("\r", "\n")

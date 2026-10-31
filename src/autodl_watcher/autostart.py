@@ -11,8 +11,7 @@ from .collectors import (
     TelemetryApiCollector,
     filter_samples_to_platform_candidates,
 )
-from .config import AutoStartConfig, AutoStartTarget, IdleThresholds, MonitorConfig
-from .evaluator import sample_meets_capacity
+from .config import AutoStartConfig, AutoStartTarget, MonitorConfig
 from .models import AvailabilityAlert, GpuSample, PlatformHost
 
 
@@ -77,16 +76,15 @@ def select_target(
     return candidates[0] if candidates else None  # 未找到可用实例时返回 None，由调用方暂缓操作。
 
 
-def is_instant_idle(
+def sample_is_fresh(
     sample: GpuSample,
-    thresholds: IdleThresholds,
     stale_after_seconds: int,
     now: datetime,
-) -> bool:  # 快检：一张 GPU 当前是否"即时空闲"（新鲜度 + 显存条件）。
+) -> bool:  # GPU 指标不作门槛，仅拒绝陈旧或来自未来的样本。
     age = (now - sample.observed_at).total_seconds()
     if age < -5 or age > stale_after_seconds:
         return False  # 采样过期或来自未来
-    return sample_meets_capacity(sample, thresholds)
+    return True
 
 
 def _host_lookup(platform_hosts: list[PlatformHost], host: str) -> PlatformHost | None:  # 在平台主机列表中按规范化物理主机名查找对应状态。
@@ -99,14 +97,12 @@ class AutoStartCoordinator:  # 自动开机协调器。
         self,
         config: AutoStartConfig,
         monitor: MonitorConfig,
-        thresholds: IdleThresholds,
         platform: PlatformBrowserCollector,
         telemetry: TelemetryApiCollector,
         convert_no_gpu: bool = False,
     ) -> None:  # 初始化自动开机协调器，并注入配置、平台采集器与物理 GPU 采集器。
         self.config = config          # 自动开机配置（含 dry_run 模式）
         self.monitor = monitor        # 监控参数（stale_after_seconds 等）
-        self.thresholds = thresholds  # 显存阈值
         self.platform = platform      # 平台采集器（用于二次确认）
         self.telemetry = telemetry    # Telemetry 采集器（用于二次确认）
         self.convert_no_gpu = convert_no_gpu  # 固定入口显式启用无卡转有卡。
@@ -210,15 +206,15 @@ class AutoStartCoordinator:  # 自动开机协调器。
                 sample
                 for sample in candidate_samples
                 if sample.host == alert.host
-                and is_instant_idle( sample, self.thresholds, self.monitor.stale_after_seconds, now, )
+                and sample_is_fresh(sample, self.monitor.stale_after_seconds, now)
             ]
             if not still_ready:
-                return StartAttemptResult(  # 显存条件不再满足（可能被其他任务占用了）
+                return StartAttemptResult(  # 缺少新鲜样本时不能继续更改实例状态。
                     status="recheck_failed",
                     host=alert.host,
                     instance_uuid=target.instance_uuid,
                     machine_name=target.machine_name,
-                    message="二次确认失败：没有 GPU INDEX 满足最低可用显存。",
+                    message="二次确认失败：没有可核对的新鲜 GPU 样本。",
                     platform_free_before=host_state.free_count,
                     platform_total_before=host_state.total_count,
                 )
@@ -244,7 +240,7 @@ class AutoStartCoordinator:  # 自动开机协调器。
                                               target.machine_name, f"二次确认失败：目标入口占用详情不可用：{exc}")
                 if not valid_rows or not free_indices.intersection(sample.gpu_index for sample in still_ready):
                     return StartAttemptResult("recheck_failed", alert.host, target.instance_uuid,
-                                              target.machine_name, "二次确认失败：目标入口空闲 GPU INDEX 与达标显存不重合。")
+                                              target.machine_name, "二次确认失败：目标入口空闲 GPU INDEX 与新鲜样本不重合。")
 
         if stop_requested():  # 停止信号到达后不再改变实例状态。
             return StartAttemptResult("cancelled", alert.host, target.instance_uuid, target.machine_name, "监控已请求停止。")

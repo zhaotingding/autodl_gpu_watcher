@@ -4,7 +4,7 @@
 
 # ── 监控循环参数 ──
 # poll_seconds:       每轮循环间隔（秒）
-# confirmation_seconds: GPU 需连续达标多少秒后才触发（0=立即触发）
+# confirmation_seconds: 平台空位需连续确认多少秒后才触发（0=立即触发）
 # min_idle_samples:    最少需要的连续空闲采样数
 # max_sample_gap_seconds: 连续采样之间允许的最大时间间隔（超出则重置）
 # stale_after_seconds: 采样超过此秒数视为过期
@@ -16,20 +16,6 @@ monitor:
   max_sample_gap_seconds: 120
   stale_after_seconds: 90
   reset_busy_samples: 1
-
-# ── GPU 空闲判定阈值 ──
-# gpu_util_check_enabled: 是否启用 GPU Util 硬门控（false=仅记录）
-# gpu_util_max_pct:       GPU Util 上限（启用时生效）
-# memory_free_min_mb:     最低可用显存（MB）
-# memory_free_min_ratio:  最低可用显存比例（相对于总显存）
-# 最终门槛 = max(memory_free_min_mb, 总显存 x memory_free_min_ratio)
-idle_thresholds:
-  # GPU Util 只记录，不参与拦截。
-  gpu_util_check_enabled: false
-  gpu_util_max_pct: 100
-  # 可用显存 >= max(8192 MB, 总显存的 25%)。
-  memory_free_min_mb: 8192
-  memory_free_min_ratio: 0.25
 
 platform:
   page_url: "https://private.autodl.com/console/machine"
@@ -83,4 +69,3 @@ notification:
 
 runtime:
   state_file: "runtime/state.json"
-  log_file: "runtime/logs/watcher.log"

@@ -38,10 +38,10 @@ def apply_monitor_options(config, args):  # UI 与 CLI 共用配置转换。
                         max_sample_gap_seconds=max(config.monitor.max_sample_gap_seconds, poll * 2)),
         occupancy=replace(config.occupancy,
             self_user=args.user.strip() if args.user is not None else config.occupancy.self_user))
-    if args.runtime_dir:  # 隔离诊断日志及连续采样状态。
+    if args.runtime_dir:  # 隔离连续采样状态。
         root = args.runtime_dir.resolve()
         config = replace(config, runtime=replace(config.runtime,
-            state_file=root / "state.json", log_file=root / "watcher.log"))
+            state_file=root / "state.json"))
     if args.max_cycles < 0:
         raise ValueError("max-cycles 不能为负数")
     return config

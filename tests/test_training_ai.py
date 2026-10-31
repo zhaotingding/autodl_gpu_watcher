@@ -1,4 +1,6 @@
+import gc
 import json
+from functools import partial
 import yaml
 from pathlib import Path
 import tempfile
@@ -122,18 +124,42 @@ class AIBackendTest(unittest.TestCase):
         self.assertEqual(call.kwargs['timeout'],(10,180))
         self.assertEqual(result['service_tier'],'flex')  # 返回等级与请求分开记录。
 
-    def test_excerpt_is_bounded_and_common_secrets_hidden(self):
+    def test_manual_log_is_not_silently_truncated_and_common_secrets_hidden(self):
         source='a'*13000+'\napi_key="secret123" password=pwd123 Authorization: Bearer bearer123 sk-somethinglong'
         result=excerpt(source)
-        self.assertLessEqual(len(result),12000)
+        self.assertTrue(result.startswith('a'*13000))
         for secret in ('secret123','pwd123','bearer123','sk-somethinglong'):
             self.assertNotIn(secret,result)
         with self.assertRaises(AnalysisError):
             settings({**CONFIG,'base_url':'https://user:pass@example.com/v1'})
 
+    def test_long_log_preserves_earlier_training_examples_in_request(self):
+        source = SOURCE + '\n' + 'cache records without training metrics\n' * 1000
+        with patch('autodl_watcher.training_ai.ai_credentials.read', return_value='test-secret-value'), \
+             patch('autodl_watcher.training_ai.requests.Session') as factory:
+            session = factory.return_value.__enter__.return_value
+            response = session.post.return_value.__enter__.return_value
+            response.status_code = 200
+            response.iter_lines.return_value = [completed()]
+            value = analyze(CONFIG, source)
+        sent = session.post.call_args.kwargs['json']['input'][1]['content']
+        self.assertEqual(sent, source)
+        self.assertEqual(value['profile'], RESULT)
+        self.assertGreater(len(sent), 12000)
+
+    def test_configurable_input_budget_rejects_before_key_read_or_paid_request(self):
+        with patch('autodl_watcher.training_ai.ai_credentials.read') as key, \
+             patch('autodl_watcher.training_ai.requests.Session') as network:
+            with self.assertRaisesRegex(AnalysisError, '超过本次上限'):
+                analyze({**CONFIG, 'max_log_chars': 1000}, 'x' * 1001)
+        key.assert_not_called()
+        network.assert_not_called()
+        self.assertEqual(settings({**CONFIG, 'max_log_chars': '300000'})['max_log_chars'], 300000)
+
 
 class AIUITest(unittest.TestCase):
     def setUp(self):
+        gc.collect()  # 用例反复创建Tk；旧窗口循环必须在主线程回收，不能留给日志工作线程触发GC。
         self.temp=tempfile.TemporaryDirectory()
         self.path=Path(self.temp.name)/'ai.yaml'
         self.path.write_text(json.dumps(CONFIG))
@@ -144,11 +170,95 @@ class AIUITest(unittest.TestCase):
         self.service.register(TrainingServer("s","s","host"))
         self.service.states["s"]["snapshot"]=self.service.states["s"]["tracker"].update(snapshot(SOURCE))
         self.card=self.service.states["s"]["snapshot"]["cards"][0]
+        self.read_log_mock = MagicMock(return_value={
+            'path': self.card['log_path'], 'content': SOURCE, 'size': len(SOURCE.encode())})
+        self.read_log = patch.object(self.service, 'prepare_log_read', side_effect=lambda server_id, card:
+            partial(self.read_log_mock, server_id, dict(card)))  # 只模拟已准备的只读作业；禁止实际SSH。
+        self.prepare_log_mock = self.read_log.start()
 
     def tearDown(self):
+        wait_training(self.service)  # 等本例本地重解析结束，避免把后台作业带入下一Tk解释器。
         for timer in self.root.tk.call('after','info'):
             self.root.after_cancel(timer)
         self.root.destroy();self.temp.cleanup()
+        self.read_log.stop()
+        self.service.ai = None
+        self.assistant.root = self.assistant.service = None  # 断开测试fixture的服务/视图循环，不改变生产解析结果。
+        self.root = self.service = self.assistant = self.read_log = self.read_log_mock = self.prepare_log_mock = None
+        gc.collect()  # 即使其他控件留下循环，也由当前主线程完成Tcl对象释放。
+
+    def loaded(self, dialog):
+        deadline = time.monotonic() + 2
+        while dialog._loading and time.monotonic() < deadline:
+            self.root.update();time.sleep(.01)
+        self.assertFalse(dialog._loading)
+
+    def test_manual_window_loads_complete_selected_log_without_paid_call(self):
+        full = SOURCE + '\n' + 'CACHE placeholder\n' * 2000
+        self.read_log_mock.return_value = {'path': self.card['log_path'], 'content': full, 'size': len(full.encode())}
+        with patch('autodl_watcher.training_ai_ui.analyze') as api:
+            dialog = self.assistant.explain('s', self.card)
+            self.loaded(dialog)
+            self.assertEqual(dialog.source.get('1.0', 'end-1c'), full)
+            self.assertIn('Token', dialog.source_info.cget('text'))
+            self.assertIn(self.card['log_path'], dialog.source_info.cget('text'))
+            self.read_log_mock.assert_called_once()
+            self.assertFalse(dialog.card.get('log_selected'))  # 默认来源仍可随真实训练阶段演进，不锁死前置CACHE日志。
+            api.assert_not_called()
+            dialog.destroy()
+
+    def test_failed_full_read_does_not_pretend_cached_tail_is_complete(self):
+        self.read_log_mock.side_effect = ValueError('日志已轮转')
+        with patch('autodl_watcher.training_ai_ui.analyze') as api:
+            dialog = self.assistant.explain('s', self.card)
+            self.loaded(dialog)
+            self.assertEqual(dialog.source.get('1.0', 'end-1c'), '')
+            self.assertIn('未使用短片段冒充全文', dialog.source_info.cget('text'))
+            api.assert_not_called()
+            dialog.destroy()
+
+    def test_preparing_full_read_failure_is_displayed_without_starting_worker_or_paid_call(self):
+        self.prepare_log_mock.side_effect = ValueError('任务身份已变化')
+        with patch('autodl_watcher.training_ai_ui.threading.Thread') as worker, \
+             patch('autodl_watcher.training_ai_ui.analyze') as api:
+            dialog = self.assistant.explain('s', self.card)
+            self.loaded(dialog)
+            self.assertEqual(dialog.source.get('1.0', 'end-1c'), '')
+            self.assertIn('任务身份已变化', dialog.source_info.cget('text'))
+            self.assertIn('未使用短片段冒充全文', dialog.source_info.cget('text'))
+            worker.assert_not_called()
+            self.read_log_mock.assert_not_called()
+            api.assert_not_called()
+            dialog.destroy()
+
+    def test_edited_preview_over_budget_is_rejected_before_paid_request(self):
+        with patch('autodl_watcher.training_ai_ui.analyze') as api:
+            dialog = self.assistant.explain('s', self.card)
+            self.loaded(dialog)
+            dialog.config_snapshot['max_log_chars'] = 1000
+            dialog.source.delete('1.0', 'end');dialog.source.insert('1.0', 'x' * 1001)
+            dialog.start()
+            self.assertIn('超过本次上限', dialog.status.cget('text'))
+            self.assertFalse(self.assistant.busy)
+            api.assert_not_called()
+            dialog.destroy()
+
+    def test_explicit_log_selection_changes_full_read_source(self):
+        alternative = '/project/actual-training.log'
+        card = dict(self.card, log_sources=[{'path': self.card['log_path'], 'identity': '1:1'},
+                                           {'path': alternative, 'identity': '1:2'}])
+        self.read_log_mock.side_effect = lambda server_id, selected: {'path': selected['log_path'],
+            'content': 'source=' + selected['log_path'], 'size': 100}
+        dialog = self.assistant.explain('s', card)
+        self.loaded(dialog)
+        dialog.log_path.set(alternative)
+        dialog.read_full_log()
+        self.loaded(dialog)
+        self.assertEqual(dialog.card['log_path'], alternative)
+        self.assertEqual(dialog.card['log_identity'], '1:2')
+        self.assertTrue(dialog.card['log_selected'])
+        self.assertEqual(dialog.source.get('1.0', 'end-1c'), 'source=' + alternative)
+        dialog.destroy()
 
     def test_settings_save_clears_key_and_does_not_call_api(self):
         with patch('autodl_watcher.training_ai.ai_credentials.read',return_value=''),patch('autodl_watcher.training_ai.ai_credentials.save') as save,patch('autodl_watcher.training_ai.requests.Session') as network:
@@ -204,6 +314,7 @@ class AIUITest(unittest.TestCase):
         state=self.service.states['s']
         state['snapshot']=state['tracker'].update(snapshot('a new unrecognized format'))
         dialog=self.assistant.explain('s',self.card)
+        self.loaded(dialog)
         self.assertIn('当前片段未匹配规则',dialog.output.get('1.0','end'))
         self.assertNotIn('已用于主卡片',dialog.output.get('1.0','end'))
         state['snapshot']=state['tracker'].update(snapshot(SOURCE))
@@ -219,6 +330,7 @@ class AIUITest(unittest.TestCase):
         card=dict(self.card)
         with patch('autodl_watcher.training_ai_ui.analyze',side_effect=response) as api:
             dialog=self.assistant.explain("s",card)
+            self.loaded(dialog)
             self.root.update();api.assert_not_called()
             dialog.start();self.assertTrue(started.wait(1))
             other=self.assistant.explain("s",card);other.start()
@@ -241,6 +353,7 @@ class AIUITest(unittest.TestCase):
             raise AnalysisError('模拟失败')
         with patch('autodl_watcher.training_ai_ui.analyze',side_effect=response):
             dialog=self.assistant.explain("s",self.card)
+            self.loaded(dialog)
             dialog.start();dialog.destroy()
             self.assertIsNone(dialog.timer)
             self.assertTrue(self.assistant.busy)

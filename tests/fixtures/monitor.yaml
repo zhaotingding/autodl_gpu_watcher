@@ -6,11 +6,6 @@ monitor:
   max_sample_gap_seconds: 120
   stale_after_seconds: 90
   reset_busy_samples: 1
-idle_thresholds:
-  gpu_util_check_enabled: false
-  gpu_util_max_pct: 100
-  memory_free_min_mb: 8192
-  memory_free_min_ratio: 0.25
 platform:
   page_url: https://private.autodl.com/console/machine
   api_path_contains: /api/v2/machine/list
@@ -72,4 +67,3 @@ notification:
   subject_prefix: '[AutoDL 开机达标]'
 runtime:
   state_file: runtime/state.json
-  log_file: runtime/logs/watcher.log

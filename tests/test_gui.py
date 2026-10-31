@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from autodl_watcher.config import load_config
-from autodl_watcher.gui import ROOT, SESSION_PREFIX, discover, log_tag, monitor_command, worker_command, worker_python, main as gui_main
+from autodl_watcher.gui import ROOT, SESSION_PREFIX, discover, status_level, monitor_command, worker_command, worker_python, main as gui_main
 from autodl_watcher.collectors.platform import PlatformAuthenticationError, PlatformTransientError
 from autodl_watcher.main import _build_parser, apply_monitor_options, main, positive_seconds
 
@@ -42,13 +42,13 @@ class GuiOptionsTest(unittest.TestCase):
                     worker_command("arbitrary-module")  # 保留任务白名单，不能借入口执行任意模块。
 
     def test_log_colors_prioritize_failures(self):
-        self.assertEqual(log_tag("开机成功，但验证失败"), "error")
-        self.assertEqual(log_tag("连接断开，正在重连"), "error")
-        self.assertEqual(log_tag("GPU额度不足，暂停自动开机"), "error")
-        self.assertEqual(log_tag("已开机，继续监控"), "success")
-        self.assertEqual(log_tag("开机成功 · connected"), "success")
-        self.assertEqual(log_tag("本人占用待确认"), "normal")
-        self.assertEqual(log_tag("登录会话已同步，等待核验"), "normal")
+        self.assertEqual(status_level("开机成功，但验证失败"), "error")
+        self.assertEqual(status_level("连接断开，正在重连"), "error")
+        self.assertEqual(status_level("GPU额度不足，暂停自动开机"), "error")
+        self.assertEqual(status_level("已开机，继续监控"), "success")
+        self.assertEqual(status_level("开机成功 · connected"), "success")
+        self.assertEqual(status_level("本人占用待确认"), "normal")
+        self.assertEqual(status_level("登录会话已同步，等待核验"), "normal")
 
     def test_log_colors_follow_events_instead_of_configuration_or_request_receipts(self):
         cases = [("Telemetry容错：单次超时20秒；瞬时失败后等待2秒重试；每轮最多2次请求。", "normal"),
@@ -63,7 +63,7 @@ class GuiOptionsTest(unittest.TestCase):
                  ("本人 GPU 占用 有 · GPU 占用弹窗采集失败", "error")]
         for line, expected in cases:
             with self.subTest(line=line):
-                self.assertEqual(log_tag(line), expected)
+                self.assertEqual(status_level(line), expected)
 
     def test_gui_debug_option_reaches_window_without_starting_monitor(self):
         with patch("sys.argv", ["AutoDLWatcher.exe", "--debug"]), patch("autodl_watcher.gui.tk.Tk") as tk_root, \

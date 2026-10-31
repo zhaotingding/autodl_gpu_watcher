@@ -8,7 +8,7 @@ from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import ai_credentials
-from .training_ai import DEFAULT_PROMPT, DEFAULTS, analyze, excerpt, load_settings, save_settings
+from .training_ai import DEFAULT_LOG_CHARS, DEFAULT_PROMPT, DEFAULTS, analyze, excerpt, load_settings, save_settings
 from .ai_service import AIService
 from .training_ai_usage import UsageStore, call_text, LUNA_PRICES, pricing_settings
 
@@ -56,7 +56,8 @@ class AIAssistant(AIService):
                 if not card.get("alive") or not card.get("details") or self.entry(server_id, card):
                     continue
                 try:
-                    self.generate(server_id, card, card["details"])
+                    budget = min(12000, self.config.get("max_log_chars", DEFAULT_LOG_CHARS))
+                    self.generate(server_id, card, card["details"][-budget:])  # 自动请求沿用旧预算，不因手动全文功能扩大计费。
                 except (ValueError, OSError) as exc:
                     self.store.error = "默认监控 · 自动生成已暂停：" + str(exc)
                 return
@@ -111,6 +112,12 @@ class AISettings(ttk.Frame):
         ttk.Label(connection, text="适用于 AutoDL、4090 和以后新增的所有服务器；任务规则分别保存。\nflex 为弹性等级，default 为 Standard；失败不自动提价重试。\n密钥独立存于 Windows 凭据管理器，留空保留此地址已存密钥。\n仅生成规则时调用AI；日常采样使用本地规则。保存不代表API验证成功。", wraplength=620).grid(row=6, column=0, columnspan=2, padx=8, pady=8, sticky="w")
         ttk.Button(connection, text="删除此地址密钥", command=self.delete_key).grid(row=7, column=1, sticky="e", padx=8)
         ttk.Label(prompt, text="所有服务器生成规则时共用。保存后用于后续请求；已有规则需手动更新。\n固定JSON格式契约由程序补充；这里配置指标与显示需求，不填写Shell命令。", wraplength=620).pack(anchor="w", pady=6)
+        limit_bar = ttk.Frame(prompt)
+        limit_bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(limit_bar, text="单次日志字符上限：").pack(side="left")
+        self.log_limit = tk.StringVar(value=str(config.get("max_log_chars", DEFAULT_LOG_CHARS)))
+        ttk.Entry(limit_bar, textvariable=self.log_limit, width=12).pack(side="left")
+        ttk.Label(limit_bar, text="超限拒绝发送；请按模型上下文和费用设置。", wraplength=380).pack(side="left", padx=8)
         self.prompt = ScrolledText(prompt, height=12, wrap="word", font=("Microsoft YaHei UI", 10))
         self.prompt.pack(fill="both", expand=True)
         self.prompt.insert("1.0", config.get("prompt", DEFAULT_PROMPT))
@@ -206,7 +213,7 @@ class AISettings(ttk.Frame):
                 for var in self.prices.values():
                     var.set("")
                 raise ValueError("模型或地址已变更，旧单价已清空；请填写新单价，或留空再次保存（费用未知）。")
-            values.update(auto_generate=self.auto.get(), prompt=self.prompt.get("1.0", "end-1c"),
+            values.update(auto_generate=self.auto.get(), prompt=self.prompt.get("1.0", "end-1c"), max_log_chars=self.log_limit.get(),
                           pricing={**prices, "base_url": scope[0], "model": scope[1]})
             config = save_settings(self.path, values, self.key.get())
             self.key.delete(0, "end")
@@ -228,18 +235,36 @@ class AISettings(ttk.Frame):
 class AnalysisWindow(tk.Toplevel):
     def __init__(self, parent, assistant, server_id, card):
         super().__init__(parent)
-        self.assistant, self.server_id, self.card = assistant, server_id, card
+        self.assistant, self.server_id, self.card = assistant, server_id, dict(card)
         self.timer, self.identity = None, None
+        self._loading, self._load_generation = False, 0
+        self._log_results = queue.Queue()  # 原日志读取与AI请求分开；后台不持有窗口。
+        self._file_bytes = None
+        self._explicit_log_source = card.get("log_selected", False)
         self.title(f"{card['name']} · PID {card['pid']} · 生成监控规则")
-        self.geometry("800x630")
+        self.geometry("850x700")
+        self.minsize(780, 600)
         self.config_snapshot = dict(assistant.config)
         target = self.config_snapshot["base_url"] + " · " + (self.config_snapshot["model"] or "尚未配置模型") + " · " + self.config_snapshot["service_tier"]
         ttk.Label(self, text="规则验证通过后直接更新本任务卡片，后续采样复用规则；日志含义仍可能判断错误。", wraplength=760).pack(anchor="w", padx=8, pady=4)
         ttk.Label(self, text="全局接口：" + target, wraplength=760).pack(anchor="w", padx=8)
-        ttk.Label(self, text="待发送片段（最多12000字符，可删改）；已遮蔽常见密钥字段，请确认剩余内容可外发。", wraplength=760).pack(anchor="w", padx=8, pady=4)
+        log_bar = ttk.Frame(self)
+        log_bar.pack(fill="x", padx=8, pady=4)
+        ttk.Label(log_bar, text="训练日志：").pack(side="left")
+        self.log_sources = {item["path"]: item for item in card.get("log_sources", [])}
+        self.log_sources.setdefault(card.get("log_path", ""), {"path": card.get("log_path", ""),
+            "identity": card.get("log_identity", ""), "size": card.get("log_size")})
+        self.log_path = tk.StringVar(value=card.get("log_path", ""))
+        self.log_choice = ttk.Combobox(log_bar, textvariable=self.log_path, values=list(self.log_sources), state="readonly")
+        self.log_choice.pack(side="left", fill="x", expand=True)
+        self.log_choice.bind("<<ComboboxSelected>>", lambda _: self.read_full_log())
+        self.reload = ttk.Button(log_bar, text="重读完整日志", command=self.read_full_log)
+        self.reload.pack(side="right", padx=(6, 0))
+        self.source_info = ttk.Label(self, text="正在读取所选训练日志；只预览，不会自动发送AI请求。", wraplength=760)
+        self.source_info.pack(anchor="w", padx=8, pady=(0, 4))
         self.source = ScrolledText(self, height=12, wrap="word", font=("Consolas", 9))
         self.source.pack(fill="both", expand=True, padx=8)
-        self.source.insert("1.0", excerpt(card.get("details", "")))
+        self.source.bind("<<Modified>>", self._source_modified)
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=8, pady=5)
         self.send = ttk.Button(bar, text="生成并应用规则（会产生费用）", command=self.start)
@@ -250,9 +275,85 @@ class AnalysisWindow(tk.Toplevel):
         self.output.pack(fill="both", expand=True, padx=8, pady=8)
         self._output(profile_text(assistant.entry(server_id, card), assistant.application_status(server_id, card)))
         self.bind("<Destroy>", self._destroyed)
-        self.timer = self.after(1000, self._poll)
+        self.read_full_log()  # 打开手动窗口即预览完整所选日志；发送仍须另点收费按钮。
+        if self.timer is None:
+            self.timer = self.after(50, self._poll)
+
+    def read_full_log(self):
+        if self._loading or self.assistant.busy:
+            self.log_path.set(self.card.get("log_path", ""))
+            return
+        path = self.log_path.get()
+        metadata = self.log_sources.get(path, {})
+        self._explicit_log_source = self._explicit_log_source or path != self.card.get("log_path")
+        self.card.update(log_path=path, log_identity=metadata.get("identity", ""), log_selected=self._explicit_log_source)
+        self._loading = True
+        self._load_generation += 1
+        self._file_bytes = None
+        generation, results = self._load_generation, self._log_results
+        self.source.configure(state="disabled")
+        self.send.configure(state="disabled")
+        self.reload.configure(state="disabled")
+        self.log_choice.configure(state="disabled")
+        self.source_info.configure(text="正在后台读取完整训练日志（单文件最多4 MiB）；不新建SSH，不发送AI。", foreground="#245c45")
+        try:
+            job = self.assistant.service.prepare_log_read(self.server_id, self.card)  # 卡片/来源校验在主线程完成。
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, (OSError, ValueError, KeyError)) else "训练原日志读取失败"
+            results.put((generation, None, message))  # 准备失败也走同一异步结果通道，不用尾片段冒充全文。
+        else:
+            def read():
+                try:
+                    results.put((generation, job(), ""))  # 作业仅持connection/card，后台不间接保留Tk解释器。
+                except Exception as exc:
+                    message = str(exc) if isinstance(exc, (OSError, ValueError, KeyError)) else "训练原日志读取失败"
+                    results.put((generation, None, message))
+            threading.Thread(target=read, name="training-log-preview", daemon=True).start()
+        if self.timer is None:
+            self.timer = self.after(50, self._poll)
+
+    def _source_modified(self, event=None):
+        if not self.source.edit_modified():
+            return
+        self.source.edit_modified(False)
+        if not self._loading:
+            self._source_size()
+
+    def _source_size(self):
+        count = len(self.source.get("1.0", "end-1c"))
+        limit = self.config_snapshot.get("max_log_chars", DEFAULT_LOG_CHARS)
+        size = f"文件{self._file_bytes:,}字节；" if self._file_bytes is not None else "手动输入；"
+        self.source_info.configure(text=f"{self.log_path.get()}\n{size}预览{count:,}字符；日志粗估约{(count + 3) // 4:,} Token（非精确分词）；上限{limit:,}字符。常见密钥已遮蔽，可删改后发送。",
+                                   foreground="#b42318" if count > limit else "#245c45")
+
+    def _receive_log(self):
+        try:
+            generation, log, error = self._log_results.get_nowait()
+        except queue.Empty:
+            return False
+        if generation != self._load_generation:
+            return False
+        self._loading = False
+        self.source.configure(state="normal")
+        self.send.configure(state="normal")
+        self.reload.configure(state="normal")
+        self.log_choice.configure(state="readonly")
+        self.source.delete("1.0", "end")
+        if error:
+            self.source_info.configure(text=error + "；未使用短片段冒充全文。可重新读取或手动粘贴此任务原日志。", foreground="#b42318")
+        else:
+            self._file_bytes = log.get("size")
+            self.source.insert("1.0", excerpt(log["content"]))
+            self._source_size()
+        self.source.edit_modified(False)
+        return True
 
     def start(self):
+        if self._loading:
+            return  # 不能在完整日志尚未到达时用缓存尾片段收费生成。
+        if self.assistant.busy:
+            self.status.configure(text="已有 AI 请求进行中；未重复发送。", foreground="#b42318")
+            return
         if self.timer is not None:
             self.after_cancel(self.timer)
             self.timer = None
@@ -260,9 +361,12 @@ class AnalysisWindow(tk.Toplevel):
             self.identity = self.assistant.generate(self.server_id, self.card, self.source.get("1.0", "end-1c"), self.config_snapshot)
         except (ValueError, OSError) as exc:
             self.status.configure(text=str(exc), foreground="#b42318")
+            self.timer = self.after(1000, self._poll)
             return
         self.source.configure(state="disabled")
         self.send.configure(state="disabled")
+        self.reload.configure(state="disabled")
+        self.log_choice.configure(state="disabled")
         minutes = 15 if self.config_snapshot["service_tier"] == "flex" else 3
         self.status.configure(text=f"正在生成；读取超时{minutes}分钟，普通监控继续。关闭窗口不会撤回请求。", foreground="#245c45")
         self._output("")
@@ -270,6 +374,10 @@ class AnalysisWindow(tk.Toplevel):
 
     def _poll(self):
         self.timer = None
+        self._receive_log()
+        if self._loading:
+            self.timer = self.after(50, self._poll)
+            return
         self.assistant.poll()
         if self.identity and self.assistant.busy == self.identity:
             self.timer = self.after(100, self._poll)
@@ -277,6 +385,8 @@ class AnalysisWindow(tk.Toplevel):
         entry = self.assistant.entry(self.server_id, self.card)
         self.send.configure(state="normal")
         self.source.configure(state="normal")
+        self.reload.configure(state="normal")
+        self.log_choice.configure(state="readonly")
         application = self.assistant.application_status(self.server_id, self.card)
         self.status.configure(text=application, foreground="#245c45" if "专用规则已启用" in application else "#b42318")
         self._output(profile_text(entry, application))
@@ -289,6 +399,8 @@ class AnalysisWindow(tk.Toplevel):
         self.output.configure(state="disabled")
 
     def _destroyed(self, event):
-        if event.widget is self and self.timer is not None:
-            self.after_cancel(self.timer)
-            self.timer = None
+        if event.widget is self:
+            self._load_generation += 1  # 到达的后台日志只留在独立队列，不能操作已销毁窗口。
+            if self.timer is not None:
+                self.after_cancel(self.timer)
+                self.timer = None

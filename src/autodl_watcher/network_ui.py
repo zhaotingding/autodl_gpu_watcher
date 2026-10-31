@@ -47,11 +47,12 @@ def state_label(record, stale=False):
 class NetworkPanel(tk.Toplevel):
     REFRESH_MS = 3000  # 只在面板打开时进行本机快照采样，不影响业务采集间隔。
     DRAIN_MS = 80
-    COLUMNS = ("protocol", "state", "process", "source", "target", "first_seen", "duration")
+    COLUMNS = ("purpose", "protocol", "state", "process", "source", "target", "first_seen", "duration")
 
-    def __init__(self, master, monitor):
+    def __init__(self, master, monitor, targets_provider=None):
         super().__init__(master)
         self.monitor = monitor
+        self.targets_provider = targets_provider
         self._snapshot = None
         self._records = {}
         self._messages = queue.Queue()
@@ -93,12 +94,22 @@ class NetworkPanel(tk.Toplevel):
                             command=self._render).pack(side="left", padx=(0, 10))
         ttk.Label(controls, text="筛选：").pack(side="left", padx=(10, 0))
         ttk.Entry(controls, textvariable=self.filter_text).pack(side="left", fill="x", expand=True)
+        services = ttk.LabelFrame(body, text="服务网址 / SSH目标（来自应用配置，不是TCP反查结果）", padding=4)
+        services.pack(fill="x", pady=(0, 6))
+        self.target_table = ttk.Treeview(services, columns=("purpose", "kind", "address"), show="headings", height=4)
+        for key, label, width in (("purpose", "用途 / 服务器", 230), ("kind", "协议", 80), ("address", "具体网址 / SSH别名", 720)):
+            self.target_table.heading(key, text=label)
+            self.target_table.column(key, width=width, minwidth=60, stretch=key == "address")
+        self.target_table.pack(side="left", fill="both", expand=True)
+        service_scroll = ttk.Scrollbar(services, orient="vertical", command=self.target_table.yview)
+        service_scroll.pack(side="right", fill="y")
+        self.target_table.configure(yscrollcommand=service_scroll.set)
         table_frame = ttk.Frame(body)
         table_frame.pack(fill="both", expand=True)
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
         self.table = ttk.Treeview(table_frame, columns=self.COLUMNS, show="headings", selectmode="browse")
-        for column, label, width in (("protocol", "协议", 75), ("state", "系统状态 / 观察状态", 175),
+        for column, label, width in (("purpose", "用途 / 服务器", 180), ("protocol", "协议", 75), ("state", "系统状态 / 观察状态", 175),
                                       ("process", "进程（PID）", 165), ("source", "源地址", 190),
                                       ("target", "目标地址", 190), ("first_seen", "首次观察", 135),
                                       ("duration", "已观察时长", 105)):
@@ -122,10 +133,7 @@ class NetworkPanel(tk.Toplevel):
         self.detail.configure(yscrollcommand=detail_scroll.set)
         self.status_label = ttk.Label(body, textvariable=self.status, foreground="#8a5b11", wraplength=1120)
         self.status_label.pack(anchor="w", pady=(2, 4))
-        notes = ttk.Label(body, text=("范围：本应用及已识别子进程；刷新只读取本机状态，不发送探测请求。\n"
-            "短连接可能落在采样间隙；历史仅含已观察记录（最多300条），不提供流量统计或代理上游路由。\n"
-            "首次/时长是观察值；TCP已建立不代表SSH认证成功；UDP只显示本机绑定端点。\n"
-            "连接数不等于请求次数；HTTP连接可复用，外部代理和系统服务代发的连接不在此进程树内。"), wraplength=1120)
+        notes = ttk.Label(body, text="每3秒本机快照，短连接可能遗漏。网址来自配置；SSH独立于HTTPS，IP不能直接反推出请求网址。", wraplength=1120)
         notes.pack(anchor="w")
         body.bind("<Configure>", lambda event: (notes.configure(wraplength=max(400, event.width - 10)),
             self.status_label.configure(wraplength=max(400, event.width - 10))))
@@ -138,6 +146,8 @@ class NetworkPanel(tk.Toplevel):
         self.refresh_button.configure(state="disabled")
         generation = self._generation
         self.status.set("正在后台读取本机状态…")
+        if self.targets_provider is not None:
+            self.monitor.set_targets(self.targets_provider())  # 只读主界面现有配置，不触发业务网络请求。
         messages, monitor = self._messages, self.monitor
 
         def read():
@@ -198,7 +208,8 @@ class NetworkPanel(tk.Toplevel):
 
     def _values(self, record, captured_at):
         end = self._observed_until(record, captured_at)
-        return (record.protocol, state_label(record, bool(self._last_error)), f"{record.process_name}（{record.pid}）",
+        return (getattr(record, "purpose", "") or record.process_name, record.protocol,
+                state_label(record, bool(self._last_error)), f"{record.process_name}（{record.pid}）",
                 endpoint(record.local_address, record.local_port), endpoint(record.remote_address, record.remote_port),
                 timestamp(record.first_seen), duration(end - record.first_seen))
 
@@ -216,6 +227,10 @@ class NetworkPanel(tk.Toplevel):
             self.status.set(self._last_error)
             return
         entries = snapshot.entries
+        self.target_table.delete(*self.target_table.get_children())
+        for item in getattr(snapshot, "targets", ()):
+            if item.target:
+                self.target_table.insert("", "end", values=(item.purpose, item.kind, item.target))
         current = sum(record.closed_at is None for record in entries)
         warnings = tuple(snapshot.errors)
         count_text = ("状态未知，未取得可核验的连接记录" if not entries and (warnings or self._last_error) else
@@ -262,6 +277,7 @@ class NetworkPanel(tk.Toplevel):
             text = "点击一条记录查看系统状态、PID、源/目标端点及观察时间。"
         else:
             text = (f"进程：{record.process_name}  PID：{record.pid}  进程启动：{timestamp(record.process_started_at, True)}\n"
+                    f"用途：{getattr(record, 'purpose', '') or '系统连接'}  配置目标：{getattr(record, 'logical_target', '') or '未核对当前TCP对应网址'}\n"
                     f"协议：{record.protocol}  原始状态：{record.state}  观察状态：{state_label(record, bool(self._last_error))}\n"
                     f"源地址：{endpoint(record.local_address, record.local_port)}\n"
                     f"目标地址：{endpoint(record.remote_address, record.remote_port)}\n"

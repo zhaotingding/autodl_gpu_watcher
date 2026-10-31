@@ -58,7 +58,7 @@ class IconManager:
         self.root, self.folder = root, folder
         self.config = folder / "icon.yaml"
         self.photos, self.frames = [], []
-        self.path, self.message = None, "使用系统默认图标"
+        self.path, self.message = None, "使用项目默认图标"
         self.changed = False
         try:
             if settings_source(self.config).exists():
@@ -124,7 +124,7 @@ class IconManager:
         self.folder.mkdir(parents=True, exist_ok=True)
         write_settings(self.config, {"file": None})
         self.apply(load_icon(Path(__file__).with_name("default.ico"))[1])
-        self.path, self.message = None, "已恢复系统默认图标"
+        self.path, self.message = None, "已恢复项目默认图标"
         self.changed = True
 
     def sync_executable(self):

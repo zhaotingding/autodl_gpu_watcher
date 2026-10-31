@@ -24,7 +24,7 @@ class OccupancyObserverTest(unittest.TestCase):
         collector.collect_occupancy.side_effect = [[record(config.occupancy.self_user, 0), record("other", 1)],
                                                    [record("other", 0), record("other", 1)],
                                                    [record("other", 0), record("other", 1)]]
-        observer = OccupancyObserver(config, collector, evaluator, Mock(), host.host, False)
+        observer = OccupancyObserver(config, collector, evaluator, host.host, False)
         with redirect_stdout(io.StringIO()) as output:
             observer.collect(host, [], False, lambda: False)
             self.assertTrue(observer.owned_instances)

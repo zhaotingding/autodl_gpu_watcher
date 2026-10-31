@@ -169,7 +169,7 @@ class TelemetryRetryTest(unittest.TestCase):  # Telemetry 瞬时故障重试逻�
             requests.ReadTimeout("second"),
         ]
 
-        with self.assertRaisesRegex(TelemetryUnavailable, "second"):
+        with self.assertRaisesRegex(TelemetryUnavailable, "HTTP 请求超时"):
             collector.collect()
 
         self.assertEqual(collector._session.get.call_count, 2)

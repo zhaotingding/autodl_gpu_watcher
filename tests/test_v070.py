@@ -143,11 +143,11 @@ class Version070Test(unittest.TestCase):
             self.assertEqual(platform.return_value.collect_occupancy.call_count, 4)  # 两轮都读取两个入口，不复用旧名单。
             self.assertEqual(text.count("监控203-1 | 实例状态：有卡运行 | 动作：继续监控"), 2)
             self.assertEqual(text.count("203-1[#1:自己,#1:其他用户]; 203-2[#1:自己,#1:其他用户]"), 2)
-            self.assertEqual(text.count("平台空闲：203-1=0/2,203-2=0/2"), 2)
+            self.assertEqual(text.count("空闲：203-1=0/2,203-2=0/2"), 2)
             lines = text.splitlines()
             for index, line in enumerate(lines):
                 if "] 监控203-1 |" in line:
-                    self.assertIn("平台空闲：", line)
+                    self.assertIn("空闲：", line)
                     self.assertTrue(lines[index + 1].startswith("  203-1["))
             self.assertNotIn("占用更新", text)
             for old in ("占用快照 |", "实例保留=", "物理GPU并发=", "新增事件=", "预选入口=", "开机达标=", "监控203-2 |"):

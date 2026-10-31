@@ -5,11 +5,10 @@ from dataclasses import replace
 from unittest.mock import Mock, call
 from datetime import datetime, timedelta
 
-from autodl_watcher.autostart import AutoStartCoordinator, is_instant_idle, select_target
+from autodl_watcher.autostart import AutoStartCoordinator, sample_is_fresh, select_target
 from autodl_watcher.config import (
     AutoStartConfig,
     AutoStartTarget,
-    IdleThresholds,
     MonitorConfig,
 )
 from autodl_watcher.models import AvailabilityAlert, ConfirmedGpu, GpuSample, OccupancyRecord, PlatformHost
@@ -25,7 +24,6 @@ class AutoStartTest(unittest.TestCase):
             stale_after_seconds=90,
             reset_busy_samples=1,
         )
-        self.thresholds = IdleThresholds(False, 100, 8192, 0.25)
         self.target_202 = AutoStartTarget(
             host="gpu-202",
             machine_name="autodl-202-2",
@@ -60,14 +58,14 @@ class AutoStartTest(unittest.TestCase):
         self.assertIsNone(select_target(self._config(), "gpu-203"))
         self.assertIsNone(select_target(self._config(), "gpu-201"))
 
-    def test_instant_capacity_accepts_high_util_when_vram_is_enough(self) -> None:  # 验证测试场景 `instant_capacity_accepts_high_util_when_vram_is_enough` 的预期行为。
+    def test_instant_recheck_only_requires_fresh_samples(self) -> None:  # 显存及利用率不阻止平台空位，陈旧样本仍拒绝。
         now = datetime(2026, 7, 20, 16, 0, 0)
         high_util_good_vram = GpuSample("gpu-202", 0, "TITAN", 100, 2000, 24576, now)
         low_vram = GpuSample("gpu-202", 0, "TITAN", 0, 20000, 24576, now)
         stale = GpuSample( "gpu-202", 0, "TITAN", 0, 300, 24576, now - timedelta(seconds=100) )
-        self.assertTrue(is_instant_idle(high_util_good_vram, self.thresholds, 90, now))
-        self.assertFalse(is_instant_idle(low_vram, self.thresholds, 90, now))
-        self.assertFalse(is_instant_idle(stale, self.thresholds, 90, now))
+        self.assertTrue(sample_is_fresh(high_util_good_vram, 90, now))
+        self.assertTrue(sample_is_fresh(low_vram, 90, now))
+        self.assertFalse(sample_is_fresh(stale, 90, now))
 
     def test_dry_run_never_calls_platform_api(self) -> None:  # 验证测试场景 `dry_run_never_calls_platform_api` 的预期行为。
         class FailIfCalled:
@@ -102,7 +100,6 @@ class AutoStartTest(unittest.TestCase):
         coordinator = AutoStartCoordinator(
             self._config(dry_run=True),
             self.monitor,
-            self.thresholds,
             FailIfCalled(),
             FailIfCalled(),
         )
@@ -152,7 +149,6 @@ class NoGpuConversionTest(unittest.TestCase):
         self.second = AutoStartTarget("gpu-203", "autodl-203-2", "instance-2", "gpu", 20, True)
         self.config = AutoStartConfig(True, "gpu-203", False, True, 0, -1, 1, (self.first, self.second))
         self.monitor = MonitorConfig(1, 0, 1, 2, 90, 1)
-        self.thresholds = IdleThresholds(False, 100, 8192, 0.25)
         self.platform = Mock()
         self.platform.get_instance_state = InstanceStateMock()
         self.platform.get_account_instances.side_effect = lambda **kwargs: [{
@@ -179,15 +175,15 @@ class NoGpuConversionTest(unittest.TestCase):
             ("autodl-203-1", "autodl-203-2"), self.before.source_slots)
 
     def _starter(self):
-        return AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+        return AutoStartCoordinator(self.config, self.monitor,
                                     self.platform, self.telemetry, convert_no_gpu=True)
 
-    def test_free_entry_and_ready_memory_on_different_gpu_blocks_shutdown(self):
+    def test_free_entry_and_fresh_sample_on_different_gpu_blocks_shutdown(self):
         host = replace(self.before, free_count=1,
                        source_slots=(("autodl-203-1", 1, 2), ("autodl-203-2", 1, 2)))
         self.platform.collect.return_value = [host]
         self.telemetry.collect.return_value = [
-            GpuSample("gpu-203", 0, "Tesla V100", 0, 30000, 32000, datetime.now()),
+            GpuSample("gpu-203", 0, "Tesla V100", 0, 30000, 32000, datetime.now() - timedelta(seconds=100)),
             GpuSample("gpu-203", 1, "Tesla V100", 0, 0, 32000, datetime.now()),
         ]
         self.platform.get_instance_state.return_value = {
@@ -201,11 +197,11 @@ class NoGpuConversionTest(unittest.TestCase):
                        source_slots=(("autodl-203-1", 1, 2), ("autodl-203-2", 1, 2)))
         self.platform.collect.return_value = [host]
         self.telemetry.collect.return_value = [
-            GpuSample("gpu-203", 0, "Tesla V100", 0, 30000, 32000, datetime.now()),
+            GpuSample("gpu-203", 0, "Tesla V100", 0, 30000, 32000, datetime.now() - timedelta(seconds=100)),
             GpuSample("gpu-203", 1, "Tesla V100", 0, 0, 32000, datetime.now()),
         ]
         starter = AutoStartCoordinator(replace(self.config, verify_before_start=False), self.monitor,
-                                       self.thresholds, self.platform, self.telemetry, convert_no_gpu=True)
+                                       self.platform, self.telemetry, convert_no_gpu=True)
         self.assertEqual(starter.attempt(self.alert).status, "recheck_failed")
         self.platform.collect.assert_called_once()
         self.platform.post_api_json.assert_not_called()
@@ -231,7 +227,7 @@ class NoGpuConversionTest(unittest.TestCase):
         self.assertEqual(self._starter().attempt(self.alert).status, "recheck_failed")
         self.platform.post_api_json.assert_not_called()
 
-    def test_free_entry_and_ready_memory_on_different_gpu_blocks_power_on(self):
+    def test_free_entry_and_fresh_sample_on_different_gpu_blocks_power_on(self):
         after = replace(self.after, free_count=1,
                         source_slots=(("autodl-203-1", 1, 2), ("autodl-203-2", 1, 2)))
         self.platform.collect.side_effect = [[self.before], [after]]
@@ -388,7 +384,7 @@ class NoGpuConversionTest(unittest.TestCase):
             "status": "shutdown", "start_mode": "gpu", "host_account_gpu_clear": True}
         self.platform.post_api_json.return_value = {
             "code": "GpuStockReqNum", "msg": "tenant quota exceeded"}
-        starter = AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+        starter = AutoStartCoordinator(self.config, self.monitor,
                                        self.platform, self.telemetry)
         blocked = starter.attempt(self.alert)
         self.assertEqual(blocked.status, "quota_blocked")
@@ -403,7 +399,7 @@ class NoGpuConversionTest(unittest.TestCase):
             "/api/v2/instance/power_on", {"instance_uuid": self.first.instance_uuid, "start_mode": "gpu"})
         self.platform.post_api_json.reset_mock()
         self.platform.post_api_json.return_value = {"code": "Success"}
-        restarted = AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+        restarted = AutoStartCoordinator(self.config, self.monitor,
                                          self.platform, self.telemetry)
         self.assertEqual(restarted.attempt(self.alert).status, "request_accepted")  # 显式重启监控才建立新协调器。
         self.platform.post_api_json.assert_called_once()
@@ -479,7 +475,7 @@ class NoGpuConversionTest(unittest.TestCase):
 
     def test_dry_run_does_not_query_instance_or_send_state_change(self):
         starter = AutoStartCoordinator(replace(self.config, dry_run=True), self.monitor,
-            self.thresholds, self.platform, self.telemetry, convert_no_gpu=True)
+            self.platform, self.telemetry, convert_no_gpu=True)
         self.assertEqual(starter.attempt(self.alert).status, "dry_run")
         self.platform.get_instance_state.assert_not_called()
         self.platform.post_api_json.assert_not_called()
@@ -490,7 +486,7 @@ class NoGpuConversionTest(unittest.TestCase):
             "status": "shutdown", "start_mode": "gpu", "host_account_gpu_clear": True,
         }
         self.platform.post_api_json.return_value = {"code": "Success"}
-        starter = AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+        starter = AutoStartCoordinator(self.config, self.monitor,
                                        self.platform, self.telemetry)
         self.assertEqual(starter.attempt(self.alert).status, "request_accepted")
         self.platform.get_instance_state.assert_called_once_with("instance-1", "autodl-203-1")
@@ -505,12 +501,12 @@ class NoGpuConversionTest(unittest.TestCase):
             GpuSample("gpu-203", 1, "Tesla V100", 0, 0, 32000, datetime.now())]
         self.platform.get_instance_state.return_value = {
             "status": "shutdown", "start_mode": "gpu", "host_account_gpu_clear": True}
-        starter = AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+        starter = AutoStartCoordinator(self.config, self.monitor,
                                        self.platform, self.telemetry)
         self.assertEqual(starter.attempt(self.alert).status, "recheck_failed")
         self.platform.post_api_json.assert_not_called()
 
-    def test_a100_four_gpu_conversion_uses_same_target_and_capacity_ratio(self):
+    def test_a100_high_memory_usage_does_not_override_platform_free_index(self):
         target = AutoStartTarget("gpu-201", "autodl-201-1", "a100-instance", "gpu", 10, True)
         config = replace(self.config, default_host="gpu-201", targets=(target,))
         host = PlatformHost("gpu-201", 2, 4, (target.machine_name,), ((target.machine_name, 2, 4),))
@@ -522,7 +518,7 @@ class NoGpuConversionTest(unittest.TestCase):
                             "NVIDIA A100-SXM4-40GB", index >= 2, "", "", "")
             for index in range(4)]
         self.telemetry.collect.return_value = [
-            GpuSample("gpu-201", 0, "NVIDIA A100-SXM4-40GB", 0, 32000, 40960, datetime.now())]
+            GpuSample("gpu-201", 0, "NVIDIA A100-SXM4-40GB", 100, 40960, 40960, datetime.now())]
         self.platform.get_instance_state.side_effect = [
             {"status": "running", "start_mode": "non_gpu", "host_account_gpu_clear": True},
             {"status": "shutdown", "start_mode": "non_gpu", "host_account_gpu_clear": True},
@@ -530,12 +526,8 @@ class NoGpuConversionTest(unittest.TestCase):
             {"status": "shutdown", "start_mode": "non_gpu", "host_account_gpu_clear": True}
         ]
         self.platform.post_api_json.return_value = {"code": "Success"}
-        starter = AutoStartCoordinator(config, self.monitor, self.thresholds,
+        starter = AutoStartCoordinator(config, self.monitor,
                                        self.platform, self.telemetry, convert_no_gpu=True)
-        self.assertEqual(starter.attempt(alert).status, "recheck_failed")  # 8960MB低于A100的25%门槛，不能关机。
-        self.platform.post_api_json.assert_not_called()
-        self.telemetry.collect.return_value = [
-            GpuSample("gpu-201", 0, "NVIDIA A100-SXM4-40GB", 0, 30000, 40960, datetime.now())]
         self.assertEqual(starter.attempt(alert).status, "shutdown_requested")
         self.assertEqual(starter.continue_switch().status, "request_accepted")
         self.assertEqual(self.platform.post_api_json.call_args_list, [
@@ -550,7 +542,7 @@ class NoGpuConversionTest(unittest.TestCase):
                 self.platform.get_instance_state.return_value = {
                     "status": status, "start_mode": "non_gpu", "host_account_gpu_clear": proof,
                 }
-                starter = AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+                starter = AutoStartCoordinator(self.config, self.monitor,
                                                self.platform, self.telemetry)
                 self.assertEqual(starter.attempt(self.alert).status, "instance_state_blocked")
                 self.platform.post_api_json.assert_not_called()
@@ -562,21 +554,21 @@ class NoGpuConversionTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.platform.post_api_json.reset_mock()
                 self.platform.get_instance_state.side_effect = PlatformTransientError(reason)
-                starter = AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+                starter = AutoStartCoordinator(self.config, self.monitor,
                                                self.platform, self.telemetry)
                 result = starter.attempt(self.alert)
                 self.assertEqual(result.status, "instance_state_blocked")
                 self.assertIn(reason, result.message)
                 self.platform.post_api_json.assert_not_called()
 
-    def test_regular_gpu_start_requires_capacity_even_when_optional_recheck_disabled(self):
+    def test_regular_gpu_start_requires_fresh_index_even_when_optional_recheck_disabled(self):
         config = replace(self.config, verify_before_start=False)
         self.platform.collect.return_value = [self.before]
         self.platform.get_instance_state.return_value = {
             "status": "shutdown", "start_mode": "gpu", "host_account_gpu_clear": True,
         }
         self.platform.post_api_json.return_value = {"code": "Success"}
-        starter = AutoStartCoordinator(config, self.monitor, self.thresholds,
+        starter = AutoStartCoordinator(config, self.monitor,
                                        self.platform, self.telemetry)
         self.assertEqual(starter.attempt(self.alert).status, "request_accepted")
         self.platform.get_instance_state.assert_called_once_with("instance-1", "autodl-203-1")
@@ -615,7 +607,7 @@ class AccountNoGpuReleaseTest(unittest.TestCase):
         return {"code": "Success"}
 
     def _starter(self):
-        return AutoStartCoordinator(self.config, self.monitor, self.thresholds,
+        return AutoStartCoordinator(self.config, self.monitor,
                                     self.platform, self.telemetry, convert_no_gpu=True)
 
     def test_releases_unconfigured_other_hosts_then_starts_original_shutdown_target(self):
@@ -753,8 +745,8 @@ class AccountNoGpuReleaseTest(unittest.TestCase):
         self.platform.get_account_instances.assert_called_with(require_personal_scope=True)
         self.platform.post_api_json.assert_not_called()
 
-    def test_capacity_failure_does_not_shutdown_other_hosts(self):
-        self.telemetry.collect.return_value = [GpuSample("gpu-203", 0, "Tesla V100", 0, 31900, 32000, datetime.now())]
+    def test_stale_telemetry_does_not_shutdown_other_hosts(self):
+        self.telemetry.collect.return_value = [GpuSample("gpu-203", 0, "Tesla V100", 0, 31900, 32000, datetime.now() - timedelta(seconds=100))]
         self.assertEqual(self._starter().attempt(self.alert).status, "recheck_failed")
         self.platform.get_account_instances.assert_not_called()
         self.platform.post_api_json.assert_not_called()

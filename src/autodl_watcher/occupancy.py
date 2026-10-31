@@ -11,8 +11,8 @@ from .monitor_state import (_INSTANCE_UUID, _advance_absence_confirmation, _fres
 
 class OccupancyObserver:
     """由平台总循环调用一次；失败/停止不能把用户判为空闲或下机。"""
-    def __init__(self, config, collector, evaluator, logger, host, auto_start_enabled):
-        self.config, self.collector, self.evaluator, self.logger = config, collector, evaluator, logger
+    def __init__(self, config, collector, evaluator, host, auto_start_enabled):
+        self.config, self.collector, self.evaluator = config, collector, evaluator
         self.selected_host, self.self_user = host, config.occupancy.self_user.strip()
         self.auto_start_enabled = auto_start_enabled
         self.targets = sorted(
@@ -75,11 +75,6 @@ class OccupancyObserver:
                 except Exception as entry_exc:
                     failed_entries.append(f"{entry_name.removeprefix('autodl-')}:{entry_exc}")
                     entry_summaries[entry_name] = "采集失败"
-                    self.logger.exception(
-                        "occupancy entry capture failed host=%s entry=%s",
-                        self.selected_host,
-                        entry_name,
-                    )
 
             if stop_requested():
                 return None  # 停止轮次不生成缺席或空闲证据。
@@ -104,7 +99,6 @@ class OccupancyObserver:
                 except Exception as exc:
                     account_ids.clear()  # 部分列表不参与本人归属判断。
                     identity_unresolved_now = True
-                    self.logger.warning("occupancy identity query failed host=%s: %s", self.selected_host, exc)
                 identity_label = self.self_user or "当前账号"
                 resolved_occupancy = []
                 for item in raw_occupancy:
@@ -176,13 +170,6 @@ class OccupancyObserver:
                                 f"自动开机={'重新武装' if self.auto_start_enabled else '已关闭（仅监控）'}"
                             )
                             print(rearm_line, flush=True)
-                            self.logger.warning(
-                                "self occupancy ended after repeated confirmation; evaluator rearmed host=%s reset_alerted=%d user=%s confirmations=%d",
-                                self.selected_host,
-                                rearmed_gpu_count,
-                                self.self_user,
-                                self.absence_confirmations,
-                            )
                         elif not previous_known and not pending_still_valid:
                             self.evaluator.rearm_host(self.selected_host)
 
@@ -198,6 +185,5 @@ class OccupancyObserver:
                 occupancy_summary = "占用信息处理失败，本轮不可用"
                 self.last_occupancy_failed = True
                 self.occupancy_identity_unresolved = True
-                self.logger.exception("live occupancy processing failed")
 
         return occupancy_summary, fresh_occupancy_positive

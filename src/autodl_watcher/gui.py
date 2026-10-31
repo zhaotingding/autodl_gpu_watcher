@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-from datetime import datetime
+from dataclasses import replace
 import os
 from pathlib import Path
 import queue
@@ -12,6 +11,7 @@ import subprocess
 import sys
 import threading
 import uuid
+import weakref
 import tkinter as tk
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -21,6 +21,7 @@ from .launcher import child_environment, project_python as worker_python
 from .app_icon import IconManager
 from .cli import normalize_host, positive_seconds
 from .config import load_config, validate_telemetry_endpoint
+from .gpu_resources import resource_rows, server_state
 from .login import LocalStartupError
 from .training_config import TrainingServer, load_servers, save_servers  # GUI 只读取训练配置边界，不加载解析聚合模块。
 from .training_ui import TrainingPane
@@ -41,7 +42,7 @@ def worker_command(task, *args):  # 主程序始终运行源码，后台复用�
     return [worker_python(), "-s", "-u", "-m", module, *(["--discover"] if task == "discover" else []), *args]
 
 
-def log_tag(line):  # 配置说明不是故障；实际失败优先于同一行的成功或占用信息。
+def status_level(line):  # 当前状态与实时输出统一用相同的颜色判断。
     lowered = line.strip().lower()
     if lowered.startswith("telemetry容错："):
         return "normal"
@@ -78,11 +79,27 @@ def monitor_command(config, entry, user, poll, live, stop_file, convert_no_gpu=F
     return command + (["--convert-no-gpu"] if convert_no_gpu else [])
 
 
+def gpu_row_id(entry, index):
+    return f"{entry}::gpu:{index}"  # 稳定身份用于刷新保留选中GPU，不把行号当作服务器入口。
+
+
+def resource_meter(percent):
+    if percent is None:
+        return "—"
+    filled = max(0, min(10, int(percent / 10 + .5)))
+    return "█" * filled + "░" * (10 - filled) + f" {percent:3.0f}%"  # 固定十格和三位数字，逐列保持等宽。
+
+
+def resource_state(text):
+    return text.replace("采集失败 · 保留上次数据", "采集失败（上次值）").replace(
+        "上次数据 · 采集失败", "采集失败（上次值）").replace("采集中 · 上次数据", "采集中（上次值）")
+
+
 class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main.run_monitor 执行。
     def __init__(self, root, debug=False):  # 先读基础配置和本地偏好，再创建控件与消息轮询。
         prepare_application(ROOT)
         self.root = root  # Tk 主窗口及事件循环的拥有者，子线程不直接操作它。
-        self.config = load_config(default_config_path(ROOT))  # YAML 提供目标实例、阈值、浏览器资料和运行路径。
+        self.config = load_config(default_config_path(ROOT))  # YAML 提供目标实例、监控周期、浏览器资料和运行路径。
         self.local = ROOT / ".ui"  # 不纳入 Git 的个人偏好、停止信号和启动日志目录。
         self.local.mkdir(exist_ok=True)
         self.stop_file = self.local / f"stop-{os.getpid()}"  # 以 GUI 进程号区分停止信号，避免读取上一个窗口的信号。
@@ -100,12 +117,13 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.session_message = "登录会话尚未核验"
         self.session_text = tk.StringVar(value="会话未核验 · 核验时间：—")
         self.gpu_snapshot = {"samples": [], "error": "尚未采样"}
-        self._gpu_render_key = None
+        self.power_eligibility = {}  # 开机资格保留独立状态，不再借用资源表的显示列。
         self.saved_entry = ""
         self.training = TrainingService(self.events)
         self.training.ai = AIAssistant(root, self.local / "ai.yaml", self.training)
         self.server_file = self.local / "servers.yaml"
         self.servers, self.external_panes = [], {}
+        self.temporary_training_tabs = set()  # 未固定页面仅在用户主动打开后临时显示。
         self.title_text = tk.StringVar(value="AutoDL 平台")
         try:
             self.servers = load_servers(self.server_file)
@@ -151,9 +169,6 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         style.configure("Treeview", rowheight=22, font=("Microsoft YaHei UI", 9))
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9))
         style.configure("TButton", padding=(10, 5))
-        style.configure("GPU.Horizontal.TProgressbar", background="#397ca8")
-        style.configure("Memory.Horizontal.TProgressbar", background="#34865b")
-        style.configure("Error.Horizontal.TProgressbar", background="#b43b48")
         style.configure("Title.TLabel", font=("Microsoft YaHei UI", 14, "bold"))
         self.check_images = []  # Tk不会持有Python图片引用；保留它们，防止勾选标记被回收。
         for selected in (False, True):
@@ -195,58 +210,84 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.session_label = ttk.Label(page, textvariable=self.session_text, foreground="#7a5a18", wraplength=920)
         self.session_label.pack(anchor="w", pady=(0, 4))
         page.bind("<Configure>", lambda event: self.session_label.configure(wraplength=max(200, event.width - 20)))
-        body = ttk.Frame(page)
-        body.pack(fill="x")
-        left = ttk.Frame(body, width=330)
-        left.pack(side="left", fill="y")
-        right = ttk.LabelFrame(body, text="我的训练任务", padding=6)
-        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        self.training_pane = TrainingPane(right, self.training, self.configure_training, self.poll.get)
-        self.training_pane.pack(fill="both", expand=True)
-        servers = ttk.Frame(left)
-        servers.pack(fill="x")
-        self.table = ttk.Treeview(servers, columns=("entry", "slots", "target", "training"), show="headings", height=5, selectmode="browse")
-        for column, title, width in [("entry", "服务器", 100), ("slots", "空闲/总数", 65), ("target", "自动开机", 78), ("training", "训练SSH·设置", 90)]:
-            self.table.heading(column, text=title)
-            self.table.column(column, width=width, stretch=False)
-        self.table.pack(side="left", fill="y")
-        scroll = ttk.Scrollbar(servers, orient="vertical", command=self.table.yview)
-        scroll.pack(side="right", fill="y")
-        self.table.configure(yscrollcommand=scroll.set)
-        self.table.bind("<Button-1>", self._table_click)
-        self.table.bind("<Key>", lambda event: "break" if self.process is not None else None)
-        self.table.bind("<<TreeviewSelect>>", lambda event: self._render_gpus())
-        self.gpu_panel = ttk.LabelFrame(left, text="物理 GPU", padding=(4, 3))
-        self.gpu_panel.pack(fill="x", pady=4)
-        ttk.Label(left, text="参数及开机设置：右上角“全局设置”").pack(anchor="w", pady=3)
-        controls = ttk.Frame(left)
+        self.resource_split = ttk.Panedwindow(page, orient="vertical")
+        self.resource_split.pack(fill="both", expand=True)
+        resource_area = ttk.Frame(self.resource_split)
+        self.resource_split.add(resource_area, weight=4)
+        body = ttk.Frame(resource_area)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        self.table = ttk.Treeview(body, columns=("slots", "memory", "util", "capacity", "observed", "state"),
+                                 show="tree headings", height=16, selectmode="browse")
+        self.table.heading("#0", text="服务器 / GPU", anchor="w")
+        self.table.column("#0", width=160, minwidth=145, stretch=True, anchor="w")
+        for column, title, width in [("slots", "空闲/总数", 70), ("memory", "显存占用率", 170),
+                                     ("util", "GPU 利用率", 170), ("capacity", "显存用量 / GiB", 135),
+                                     ("observed", "数据时间", 85), ("state", "采样状态 / 来源", 150)]:
+            self.table.heading(column, text=title, anchor="center")
+            self.table.column(column, width=width, minwidth=width, stretch=False, anchor="center")
+        self.table.tag_configure("server", background="#edf2f7", font=("Microsoft YaHei UI", 9, "bold"))
+        self.table.tag_configure("gpu", font=("Consolas", 10), foreground="#245c6b")
+        self.table.tag_configure("delayed", font=("Consolas", 10), foreground="#8a5b11")
+        self.table.tag_configure("invalid", font=("Consolas", 10), foreground="#b42318")
+        self.table.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.table.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(body, orient="horizontal", command=self.table.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.table.configure(yscrollcommand=scroll.set, xscrollcommand=horizontal.set)
+        controls = ttk.Frame(resource_area)
         controls.pack(fill="x", pady=4)
         self.start_button = ttk.Button(controls, text="开始监控", command=self.start, width=8)
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(controls, text="停止监控", command=self.stop, state="disabled", width=8)
         self.stop_button.pack(side="left", padx=4)
-        self.status_label = ttk.Label(page, textvariable=self.status, foreground="#245cc4")
+        self.status_label = ttk.Label(resource_area, textvariable=self.status, foreground="#245cc4", wraplength=930)
         self.status_label.pack(anchor="w", fill="x", pady=4)
-        self.status.trace_add("write", lambda *_: self.status_label.configure(
-            foreground={"success": "#18733a", "error": "#b42318"}.get(log_tag(self.status.get()), "#245cc4")))
-        log_frame = ttk.Frame(page)
-        log_frame.pack(fill="both", expand=True)
-        horizontal = ttk.Scrollbar(log_frame, orient="horizontal")
+        resource_area.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(200, event.width - 10)))
+        window_ref = weakref.ref(self)
+        def update_status(*_):
+            window = window_ref()
+            if window is not None:
+                window.status_label.configure(foreground={"success": "#18733a", "error": "#b42318"}.get(
+                    status_level(window.status.get()), "#245cc4"))
+        self.status.trace_add("write", update_status)  # 不让Tcl变量回调强持整个窗口，避免循环延迟到后台回收。
+        output = ttk.LabelFrame(self.resource_split, text="实时监控", padding=2)
+        self.resource_split.add(output, weight=1)  # 可拖动分隔线，资源区优先使用空白，黑框仍可查看。
+        horizontal = ttk.Scrollbar(output, orient="horizontal")
         horizontal.pack(side="bottom", fill="x")
-        self.log = ScrolledText(log_frame, height=8, wrap="none", state="disabled", font=("Microsoft YaHei UI", 9),
+        self.log = ScrolledText(output, height=5, wrap="none", state="disabled", font=("Microsoft YaHei UI", 9),
                                 xscrollcommand=horizontal.set, background="#17202e", foreground="#e2e8f0", padx=8, pady=6)
         horizontal.configure(command=self.log.xview)
         self.log.tag_configure("success", foreground="#79e69d")
         self.log.tag_configure("error", foreground="#ff8181")
-        self.log.pack(fill="both", expand=True)
+        self.log.pack(fill="both", expand=True)  # 仅在窗口内保留最近输出，不保存文件或累计占用时长。
         self._server_tabs()
 
+    def _append_output(self, value, level="normal"):
+        if not value.strip():
+            return
+        follow = self.log.yview()[1] >= .995
+        self.log.configure(state="normal")
+        self.log.insert("end", value.rstrip("\r\n") + "\n", level)
+        excess = int(self.log.index("end-1c").split(".")[0]) - 2001
+        if excess > 0:
+            self.log.delete("1.0", f"{excess + 1}.0")  # 固定内存上限，长期监控不无限堆积文本。
+        if follow:
+            self.log.see("end")
+        self.log.configure(state="disabled")
+
     def _server_tabs(self):
-        for server in self.servers:
-            if server.entry or server.id in self.external_panes:
-                continue
+        for server in sorted(self.servers, key=lambda item: bool(item.entry)):
+            if server.pinned or server.id in self.temporary_training_tabs:
+                self._show_training_tab(server)
+            elif server.id in self.external_panes:
+                self.notebook.hide(self.external_panes[server.id][0])  # 隐藏视图，保留服务与当前连接。
+
+    def _show_training_tab(self, server):
+        if server.id not in self.external_panes:
             page = ttk.Frame(self.notebook, padding=10)
-            self.notebook.add(page, text=server.name)
             title = ttk.Label(page, text=server.name, style="Title.TLabel")
             title.pack(anchor="w")
             options = ttk.Frame(page)
@@ -254,24 +295,27 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             ttk.Label(options, text="采样间隔（秒）").pack(side="left")
             interval = tk.StringVar(value="60")
             ttk.Entry(options, textvariable=interval, width=9).pack(side="left", padx=5)
+            ttk.Button(options, text="收起页面（不停止监控）", command=lambda key=server.id: self.hide_training(key)).pack(side="right")
             pane = TrainingPane(page, self.training, lambda key=server.id: self.edit_server(key), interval.get, show_gpus=True)
             pane.pack(fill="both", expand=True)
             pane.select(server.id)
             self.external_panes[server.id] = (page, title, pane)
+        page = self.external_panes[server.id][0]
+        self.notebook.add(page, text=server.name)  # 已隐藏的页面原样恢复，不重建控件或重复连接。
+        return page
 
-    def _table_click(self, event):
-        entry = self.table.identify_row(event.y)
-        if entry and self.table.identify_column(event.x) == "#4":
-            self.configure_training(entry)  # 编辑点击行；不改变正在监控的入口或正在查看的训练连接。
-            return "break"
-        return "break" if self.process is not None else None
+    def open_training(self, server_id):
+        server = next(item for item in self.servers if item.id == server_id)
+        self.temporary_training_tabs.add(server_id)
+        self.notebook.select(self._show_training_tab(server))
+        if self.settings_window is not None:
+            self.settings_window.withdraw()  # 切到主窗口查看，不隐式开始采集。
+        self.root.deiconify()
+        self.root.lift()
 
-    def configure_training(self, entry=None):
-        entry = entry or self.selected_entry()
-        if not entry:
-            return
-        server = next((item for item in self.servers if item.entry == entry), None)
-        self.edit_server(server.id if server else None, entry)
+    def hide_training(self, server_id):
+        self.temporary_training_tabs.discard(server_id)
+        self.notebook.hide(self.external_panes[server_id][0])  # 固定设置仍保留；重开应用按固定状态恢复。
 
     def open_settings(self, section="servers"):
         from .settings_ui import GlobalSettings
@@ -289,9 +333,21 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         if self.network_monitor is None:
             self.network_monitor = NetworkMonitor()  # 后台只读取本机状态，不触发平台或 SSH 采样。
         if self.network_window is None or not self.network_window.winfo_exists():
-            self.network_window = NetworkPanel(self.root, self.network_monitor)
+            self.network_window = NetworkPanel(self.root, self.network_monitor, targets_provider=self._network_targets)
         self.network_window.show()  # 单窗口复用；关闭详情不会断开业务连接。
         return self.network_window
+
+    def _network_targets(self):
+        targets = [dict(value, pid=pid) for pid, value in self.training.network_targets().items()]
+        targets.append({"pid": os.getpid(), "kind": "process", "purpose": "主程序", "target": ""})
+        if self.process is not None and self.process.poll() is None:
+            targets.append({"pid": self.process.pid, "kind": "process", "purpose": "AutoDL " + self.job, "target": ""})
+        for purpose, address in (("AutoDL 平台", self.config.platform.api_base_url),
+                                 ("GPU 采集站", self.config.telemetry.endpoint),
+                                 ("AI 接口", self.training.ai.config.get("base_url", ""))):
+            if address:
+                targets.append({"pid": 0, "kind": "HTTPS" if address.lower().startswith("https:") else "HTTP", "purpose": purpose, "target": address})
+        return targets  # HTTP网址单独列为配置目标，不冒充系统TCP表解析出的请求URL。
 
     def edit_server(self, server_id=None, entry=""):  # 所有入口共用全局设置中的连接编辑表单。
         server = next((item for item in self.servers if item.id == server_id), None)
@@ -299,108 +355,106 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.open_settings("servers").edit_server(server)  # 主窗口仅选择编辑对象，控件由设置窗口拥有。
 
     def save_server(self, updated):  # 先持久化，再通知训练服务；保存失败不能改变活动连接。
+        previous = next((item for item in self.servers if item.id == updated.id), None)
         servers = [updated if item.id == updated.id else item for item in self.servers]  # 更新已有连接的静态配置。
         if not any(item.id == updated.id for item in self.servers):
             servers.append(updated)  # 新服务器通过同一保存路径加入。
         save_servers(self.server_file, servers)  # 沿用原子 YAML 写入与配置校验。
         self.servers = servers
-        self.training.register(updated)  # 正在监控时服务保存待生效配置，不替换活动连接。
-        self._training_columns()
+        if previous is None or replace(updated, pinned=previous.pinned) != previous:
+            self.training.register(updated)  # 仅连接配置变化才通知服务；固定开关不重置快照或连接。
+        if previous is not None and previous.pinned and not updated.pinned:
+            self.temporary_training_tabs.discard(updated.id)  # 明确取消固定应立即收起原常驻页。
         self._server_tabs()
         if updated.id in self.external_panes:
             page, title, pane = self.external_panes[updated.id]
             self.notebook.tab(page, text=updated.name)
             title.configure(text=updated.name)
             pane.render()  # pending 或 generation 的改变会触发卡片更新，无需改视图内部缓存。
-        self._render_gpus()
+        self._render_resources()
         self.settings_window.refresh_servers()  # 已保存的连接立即进入全局连接列表。
 
-    def _render_gpus(self):  # 使用采样消息更新条形图；此处不发起网络查询。
-        entry = self.selected_entry()
-        self.title_text.set(entry.removeprefix("autodl-") or "AutoDL 平台")
-        server = next((item for item in self.servers if item.entry == entry), None)
-        self.training_pane.select(server.id if server else None)
-        host = normalize_host(entry) if entry else ""
-        samples = sorted((item for item in self.gpu_snapshot["samples"] if item["host"] == host),
-                         key=lambda item: item["gpu_index"])
-        rows = []
-        for sample in samples:
-            try:
-                age = (datetime.now() - datetime.fromisoformat(sample["observed_at"])).total_seconds()
-                stale = age > self.gpu_snapshot.get("stale_after_seconds", self.config.monitor.stale_after_seconds)
-                util, used, total = float(sample["util_pct"]), float(sample["memory_used_mb"]), float(sample["memory_total_mb"])
-                valid = all(math.isfinite(value) for value in (util, used, total)) and 0 <= util <= 100 and 0 <= used <= total and total > 0
-            except (ValueError, TypeError, KeyError):
-                stale, valid, util, used, total = False, False, 0, 0, 0
-            rows.append((sample["gpu_index"], sample["gpu_name"], sample["observed_at"], stale, valid, util, used, total))
-        key = (entry, tuple(rows), self.gpu_snapshot.get("error", ""))
-        if key == self._gpu_render_key:
-            return  # 新数据、入口切换或过期时才重画，避免每次消息轮询销毁控件。
-        self._gpu_render_key = key
-        for child in self.gpu_panel.winfo_children():
-            child.destroy()
-        self.gpu_panel.configure(text=f"{entry.removeprefix('autodl-') or '未选入口'} · {host or '物理 GPU'}")
-        if not rows:
-            ttk.Label(self.gpu_panel, text=self.gpu_snapshot.get("error") or "暂无有效 GPU 数据", foreground="#7a5a18").pack(anchor="w")
-            return
-        grid = ttk.Frame(self.gpu_panel)
-        grid.pack(fill="both", expand=True)
-        for col, title in enumerate(("GPU", "GPU 利用率", "显存占用率")):
-            ttk.Label(grid, text=title, font=("Microsoft YaHei UI", 8)).grid(row=0, column=col, sticky="w", padx=4)
-        grid.columnconfigure(1, weight=1)
-        grid.columnconfigure(2, weight=1)
-        for row, (index, name, stamp, stale, valid, util, used, total) in enumerate(rows, 1):
-            ttk.Label(grid, text=f"#{index}").grid(row=row, column=0, padx=4, sticky="w")
-            for col, value, label in ((1, util, f"{util:.0f}%"), (2, used / total * 100 if total else 0, f"{used / total * 100 if total else 0:.0f}% · {used:.0f}/{total:.0f} MB")):
-                cell = ttk.Frame(grid)
-                cell.grid(row=row, column=col, sticky="ew", padx=3, pady=1)
-                if stale or not valid:
-                    ttk.Label(cell, text="数据已过期" if stale else "数据不可用", foreground="#7a5a18").pack(anchor="w")
+    def _render_resources(self):  # 仅格式化本轮缓存，全部入口一起更新，不另发采集请求。
+        self.title_text.set("AutoDL 平台算力")
+        for entry in self.table.get_children():
+            rows = resource_rows(entry, self.gpu_snapshot, self.config.monitor.stale_after_seconds)
+            state = server_state(entry, self.gpu_snapshot, self.config.monitor.stale_after_seconds, rows=rows)
+            stamps = [row["observed_at"] for row in rows if row["observed_at"] is not None]
+            observed = min(stamps).strftime("%H:%M:%S") if stamps else "—"
+            values = (self.table.set(entry, "slots"), "", "", "", observed,
+                      resource_state(state.removesuffix(" · 物理机数据")))
+            if self.table.item(entry, "values") != values:
+                self.table.item(entry, values=values)
+            children = []
+            for row in rows:
+                item = gpu_row_id(entry, row["gpu_index"])
+                children.append(item)
+                capacity = "—" if row["used_mb"] is None else f"{row['used_mb'] / 1024:.1f} / {row['total_mb'] / 1024:.1f}"
+                stamp = row["observed_at"].strftime("%H:%M:%S") if row["observed_at"] is not None else "—"
+                origin = "物理机" if row["physical"] else "入口"
+                short_state = resource_state(row["state"]).replace("（上次值）", "")
+                values = ("", resource_meter(row["memory_pct"]), resource_meter(row["util_pct"]), capacity,
+                          stamp, f"{short_state} · {origin}")
+                tag = "invalid" if row["invalid"] or row["clock_skew"] else "delayed" if row["state"] != "正常" else "gpu"
+                if not self.table.exists(item):
+                    self.table.insert(entry, "end", iid=item, text=f"GPU #{row['gpu_index']}", values=values, tags=(tag,))
                 else:
-                    ttk.Progressbar(cell, value=value, maximum=100, length=35,
-                                    style="GPU.Horizontal.TProgressbar" if col == 1 else "Memory.Horizontal.TProgressbar").pack(side="left", fill="x", expand=True)
-                    ttk.Label(cell, text=label, font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(4, 0))
-        ttk.Label(self.gpu_panel, text=f"{rows[0][1]} · 数据时间 {min(row[2] for row in rows)[11:19]}",
-                  font=("Microsoft YaHei UI", 8)).pack(anchor="w")
+                    if self.table.item(item, "values") != values:
+                        self.table.item(item, values=values)
+                    if self.table.item(item, "tags") != (tag,):
+                        self.table.item(item, tags=(tag,))
+            for item in self.table.get_children(entry):
+                if item not in children:
+                    if item in self.table.selection():
+                        self.table.selection_set(entry)  # GPU消失时回到同一服务器，不改成其他入口。
+                    self.table.delete(item)
+            if self.table.get_children(entry) != tuple(children):
+                for index, item in enumerate(children):
+                    self.table.move(item, entry, index)
+
+    def _accept_gpu_snapshot(self, data):
+        if data.get("error") and not data.get("samples") and self.gpu_snapshot.get("samples"):
+            self.gpu_snapshot = dict(self.gpu_snapshot, error=data["error"], refreshing=False)
+        else:
+            self.gpu_snapshot = dict(data, refreshing=False)  # 新成功快照替换旧数据；错误不能刷新成功采集时间。
+        self._render_resources()
 
     def _populate(self, rows):  # rows 中每项为 (入口名, 空闲/总数文本, 开机配置状态)。
         selected = self.selected_entry() or self.saved_entry  # 刷新时优先保留本次选择，其次恢复上次保存的入口。
-        self.table.delete(*self.table.get_children())
-        for entry, slots, target in rows:
-            self.table.insert("", "end", iid=entry, values=(entry, slots, target, self._training_status(entry)))  # 用入口名作行 ID，选择结果可直接作为监控参数。
+        selected_item = next(iter(self.table.selection()), "")
+        old_eligibility = self.power_eligibility
+        self.power_eligibility = {}
+        rows = list(rows)
+        wanted = {row[0] for row in rows}
+        for entry in self.table.get_children():
+            if entry not in wanted:
+                self.table.delete(entry)
+        for index, (entry, slots, target) in enumerate(rows):
+            self.power_eligibility[entry] = old_eligibility.get(entry, "未核验") if target is None else target
+            if self.table.exists(entry):
+                self.table.set(entry, "slots", slots)
+                self.table.move(entry, "", index)
+            else:
+                self.table.insert("", index, iid=entry, text=entry, values=(slots, "", "", "", "—", "等待采样"),
+                                  open=True, tags=("server",))
         entries = self.table.get_children()
         if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window.refresh_servers()
+        self._render_resources()
         if entries:
-            self.table.selection_set(selected if selected in entries else entries[0])
-
-    def _training_status(self, entry):
-        server = next((item for item in self.servers if item.entry == entry), None)
-        if not server:
-            return "未配置"
-        state = self.training.status(server.id)
-        snapshot = self.training.snapshot(server.id)
-        if state.get("pending"):
-            return "已存待用"
-        if snapshot and snapshot.get("error"):
-            return "连接失败"
-        if state["active"]:
-            return "已连接" if snapshot else "连接中"
-        return "已停止" if snapshot else "待连接"
-
-    def _training_columns(self):
-        for entry in self.table.get_children():
-            value = self._training_status(entry)
-            if self.table.set(entry, "training") != value:
-                self.table.set(entry, "training", value)
+            self.table.selection_set(selected_item if selected_item and self.table.exists(selected_item)
+                                     else selected if selected in entries else entries[0])
 
     def selected_entry(self):  # Treeview 返回选中 ID 元组；单选表最多有一项。
         selection = self.table.selection()
-        return selection[0] if selection else ""
+        item = selection[0] if selection else ""
+        while item and self.table.parent(item):
+            item = self.table.parent(item)
+        return item  # 选中GPU子行时，监控命令和偏好仍使用父服务器入口。
 
     def _command(self):  # 从控件快照生成启动参数；不改写受 Git 管理的 YAML。
         entry = self.selected_entry()
-        verified = bool(entry and self.table.set(entry, "target") == "可开机")
+        verified = self.power_eligibility.get(entry) == "可开机"
         live = self.live.get() and verified  # 本地旧UUID不代表实际存在容器；未核验入口始终只读。
         return monitor_command(self.config, entry, self.user.get(), self.poll.get(), live,
                                self.stop_file, self.convert_no_gpu.get() and live)
@@ -408,10 +462,13 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
     def save(self):  # 保存输入前复用启动校验，避免把明显无效的设置留到下次。
         try:
             command = self._command()
-            preferences = {"entry": self.selected_entry(), "user": self.user.get().strip(),
+            preference_path = self.local / "preferences.yaml"
+            preferences = read_settings(preference_path) if settings_source(preference_path).exists() else {}
+            preferences.pop("usage", None)  # 仅移除已弃用的双采样间隔，其余个人配置（含认证）保留。
+            preferences.update({"entry": self.selected_entry(), "user": self.user.get().strip(),
                            "poll": self.poll.get(), "live": self.live.get(),
-                           "convert_no_gpu": self.live.get() and self.convert_no_gpu.get()}
-            write_settings(self.local / "preferences.yaml", preferences)
+                           "convert_no_gpu": self.live.get() and self.convert_no_gpu.get()})
+            write_settings(preference_path, preferences)
             mode = "自动开机已开启" if "--live" in command else "仅监控，不执行开机或关机"
             self.status.set(f"设置已保存 · {mode}" + (" · 当前监控保持原设置，下次开始生效" if self.job == "monitor" else ""))
             return True
@@ -430,7 +487,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         if status not in labels or not isinstance(message, str) or not isinstance(checked_at, str):
             raise ValueError("会话消息格式无效")
         self.session_status, self.session_message = status, message
-        self.session_text.set(f"{labels[status]} · {message} · 核验时间：{checked_at or '—'}")
+        detail = "" if status == "valid" else f" · {message}"
+        self.session_text.set(f"{labels[status]}{detail} · {checked_at or '—'}")
         self.session_label.configure(foreground={"valid": "#18733a", "invalid": "#b42318"}.get(status, "#7a5a18"))
 
     def _launch(self, command, job):  # 为所有任务建立相同的环境、日志管道和退出通知。
@@ -445,8 +503,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             messagebox.showerror("启动失败", str(exc), parent=self.root)
             return
         self.job = job
-        self.gpu_snapshot = {"samples": [], "error": "等待采样"}
-        self._render_gpus()
+        self.gpu_snapshot = dict(self.gpu_snapshot, refreshing=True)  # 请求在途保留上次读数，不清空整张资源表。
+        self._render_resources()
         self._busy(True)
         if job in {"discover", "monitor", "login"}:
             self._session("checking", "等待人工登录及同步后核验" if job == "login" else "正在核验真实主机接口")
@@ -495,8 +553,15 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                                     pass
                         if self.job in {"discover", "monitor", "login"} and self.session_status == "checking":
                             self._session("unknown", "核验未完成，后台任务失败，请重试" if value else "核验未完成，后台任务已结束，请重试")
+                        if self.gpu_snapshot.get("refreshing"):
+                            self.gpu_snapshot = dict(self.gpu_snapshot, refreshing=False)
+                            if value and self.job in {"discover", "monitor"}:
+                                self.gpu_snapshot["error"] = "本轮采集未完成"  # 后台已退出，不能永久显示正在采集。
+                        gpu_error = self.gpu_snapshot.get("error", "")
+                        meaningful_gpu_error = gpu_error not in {"", "等待采样", "尚未采样"}
                         self.status.set(self.session_message if self.session_status in {"invalid", "unknown"}
-                                        else "任务已结束" if value == 0 else "任务失败 · 请查看日志并重试")
+                                        else gpu_error if meaningful_gpu_error else "任务已结束" if value == 0
+                                        else "任务失败，请重试或检查连接设置")
                         if self.closing and self._shutdown_ready():
                             reschedule = False
                             self.root.destroy()
@@ -506,14 +571,16 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                         self._session(data["status"], data["message"], data["checked_at"])
                         if data["status"] in {"invalid", "unknown"}:
                             self.status.set(data["message"])
+                            self._append_output(data["message"], "error")
                     elif value.startswith(GPU_PREFIX):
-                        self.gpu_snapshot = json.loads(value[len(GPU_PREFIX):])
-                        self._render_gpus()
+                        self._accept_gpu_snapshot(json.loads(value[len(GPU_PREFIX):]))
+                        if self.gpu_snapshot.get("error"):
+                            self.status.set(self.gpu_snapshot["error"])
                     elif value.startswith(DATA_PREFIX):
                         self._populate(json.loads(value[len(DATA_PREFIX):]))
                         self.status.set("服务器列表已刷新")
                     else:
-                        tag = log_tag(value)
+                        tag = status_level(value)
                         if value.startswith(REPORT_PREFIX):
                             report = json.loads(value[len(REPORT_PREFIX):])
                             tag = report["level"]
@@ -526,12 +593,9 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                         if re.match(r"^\[\d{2}:\d{2}:\d{2}\] 监控", value):
                             self.status.set(value.splitlines()[0])  # 顶部摘要复用首行；整组颜色由采集结果决定，不从用户名猜测。
                             self.status_label.configure(foreground={"success": "#18733a", "error": "#b42318"}.get(tag, "#245cc4"))
-                        self.log.configure(state="normal")
-                        self.log.insert("end", value, tag)
-                        if int(self.log.index("end-1c").split(".")[0]) > 2000:
-                            self.log.delete("1.0", "201.0")
-                        self.log.see("end")
-                        self.log.configure(state="disabled")
+                        elif tag == "error":
+                            self.status.set(value.strip().splitlines()[0][:240])
+                        self._append_output(value, tag)  # 保留解码后的两行监控及后台实时信息，不显示内部JSON协议。
                 except Exception as exc:
                     self.status.set(f"后台消息处理失败：{exc}")
         finally:
@@ -541,12 +605,10 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                     return
                 if not self.closing:
                     self.training.tick()
-                self._training_columns()
-                self.training_pane.render()
                 for _, _, pane in self.external_panes.values():
                     pane.render()
                 try:
-                    self._render_gpus()
+                    self._render_resources()
                 except (KeyError, TypeError, ValueError) as exc:
                     self.status.set(f"GPU 图表数据不可用：{exc}")
                 self.root.after(100, self._drain)  # 坏消息不能中断后续退出通知和按钮恢复。
@@ -556,12 +618,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             return
         self.stop_file.unlink(missing_ok=True)  # 清除该窗口上一次停止留下的信号，否则新进程会立即退出。
         self._launch(self._command(), "monitor")
-        if self.process is not None and self.training_pane.server_id:
-            self.training_pane.start()
 
     def stop(self):  # 请求协作退出，不强杀正在操作浏览器或数据库的进程。
-        if self.training_pane.server_id:
-            self.training_pane.stop()
         if self.process is not None and self.job == "monitor":
             self.stop_file.touch()  # 核心在采集步骤之间及轮询等待期间检查文件是否存在。
             self.stop_button.configure(state="disabled")
@@ -633,6 +691,7 @@ def discovery_rows(config, hosts, instances):  # 只有账号真实实例UUID与
 
 def discover():  # 子进程模式：采集结果编码为一行 JSON，供父进程更新服务器表格。
     from .collectors import PlatformBrowserCollector, TelemetryApiCollector
+    from .collectors.telemetry import TelemetryUnavailable
     from .collectors.platform import PlatformAuthenticationError
     config = load_config(default_config_path(ROOT))
     collector = PlatformBrowserCollector(config.platform)
@@ -661,6 +720,9 @@ def discover():  # 子进程模式：采集结果编码为一行 JSON，供父�
             telemetry = TelemetryApiCollector(config.telemetry)
             try:
                 emit_gpu_samples(telemetry.collect(), hosts, config.monitor.stale_after_seconds)
+            except TelemetryUnavailable as exc:
+                emit_gpu_samples([], hosts, config.monitor.stale_after_seconds, str(exc))
+                print("WATCHER_STATUS " + str(exc), flush=True)  # 保留采集站认证原因，不否定平台已验证会话。
             except Exception:
                 emit_gpu_samples([], hosts, config.monitor.stale_after_seconds, "GPU 数据采集失败；可重试刷新")
                 print("GPU 数据采集失败，平台登录会话已核验有效。", flush=True)

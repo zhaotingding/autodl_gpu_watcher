@@ -266,6 +266,21 @@ class WindowIconTest(unittest.TestCase):
         self.assertIsNone(yaml.safe_load(restored.config.read_text())['file'])
         other.destroy()
 
+    def test_clean_profile_loads_project_default_and_reset_restores_its_native_pixels(self):
+        self.root.deiconify();self.root.update()
+        expected = {small: native_icon(self.root, small)[0] for small in (True, False)}
+        self.assertIsNone(self.manager.path)
+        self.assertFalse(self.manager.config.exists())  # 干净克隆不依赖或预生成维护者的个人图标设置。
+        self.assertEqual({frame.size for frame in self.manager.frames}, {(size, size) for size in SIZES})
+        self.assertEqual(self.manager.message, '使用项目默认图标')
+        self.manager.import_file(self.path);self.root.update();self.assert_loaded(self.root)
+        self.manager.reset();self.root.update()
+        for small, original in expected.items():
+            actual, meta = native_icon(self.root, small)
+            self.assertEqual(actual.size, original.size, meta)
+            self.assertEqual(actual.tobytes(), original.tobytes(), meta)  # 分别比较原生小/大图标，不用保存成功替代显示验收。
+        self.assertIsNone(yaml.safe_load(self.manager.config.read_text())['file'])
+
     def test_invalid_import_keeps_current_icon_and_preference(self):
         self.manager.import_file(self.path)
         before=self.manager.config.read_bytes();current=self.manager.path

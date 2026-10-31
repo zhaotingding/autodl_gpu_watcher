@@ -21,15 +21,6 @@ class MonitorConfig:  # 监控循环参数。
 
 
 @dataclass(frozen=True, slots=True)
-class IdleThresholds:  # GPU 空闲判定阈值。
-
-    gpu_util_check_enabled: bool  # 是否启用 GPU Util 硬门控
-    gpu_util_max_pct: float       # GPU Util 上限（启用时生效）
-    memory_free_min_mb: int       # 最低可用显存（MB）
-    memory_free_min_ratio: float  # 最低可用显存比例（相对于总显存）
-
-
-@dataclass(frozen=True, slots=True)
 class PlatformConfig:  # AutoDL 平台采集器配置（Playwright 浏览器自动化）。
     page_url: str                 # AutoDL 控制台页面 URL
     api_path_contains: str        # 匹配 API 请求路径中的特征字符串
@@ -52,6 +43,7 @@ class TelemetryConfig:  # Telemetry API 采集器配置（HTTP GET 拉取 GPU �
     max_attempts: int          # 单轮最多请求次数（含第一次）
     retry_delay_seconds: float # 两次请求之间等待秒数
     only_online: bool          # 是否只接受 host_status=online 的样本
+    settings_root: Path | None = None  # 仅运行时传递个人认证资料根，独立采集器默认不读取个人配置。
 
 
 def validate_telemetry_endpoint(endpoint: str) -> str:
@@ -109,19 +101,17 @@ class OccupancyConfig:  # 实时占用读取与本人状态核验，不记录历
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:  # 运行时文件路径。
     state_file: Path  # evaluator 状态持久化文件（JSON）
-    log_file: Path    # 监控日志文件
 
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:  # 顶层应用配置，包含所有子配置。
     monitor: MonitorConfig  # 采样节奏、连续确认和过期判定。
-    idle_thresholds: IdleThresholds  # 一张物理 GPU 是否满足空闲容量要求。
     platform: PlatformConfig  # 平台浏览器会话、入口空位来源及重试策略。
     telemetry: TelemetryConfig  # 物理 GPU 实时利用率与显存来源。
     notification: NotificationConfig  # 达标事件的通知开关。
     auto_start: AutoStartConfig  # 固定实例映射与真实开机策略。
     occupancy: OccupancyConfig  # 本人识别与实时占用复核。
-    runtime: RuntimeConfig  # 连续采样状态与运行日志的落盘位置。
+    runtime: RuntimeConfig  # 连续采样状态的落盘位置。
 
 
 def _required(mapping: dict[str, Any], key: str) -> Any:  # 从配置字典读取必填字段；字段缺失时立即给出明确错误。
@@ -144,7 +134,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:  # 读取 YAML 配
     base_dir = config_path.parent  # 相对路径以 YAML 所在目录为基准，与启动时所在目录无关。
 
     monitor = _required(raw, "monitor")
-    thresholds = _required(raw, "idle_thresholds")
     platform = _required(raw, "platform")
     telemetry = _required(raw, "telemetry")
     notification = _required(raw, "notification")
@@ -170,17 +159,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:  # 读取 YAML 配
         for item in auto_start.get("targets", [])
     )
 
-    idle_thresholds = IdleThresholds(
-        gpu_util_check_enabled=bool(thresholds.get("gpu_util_check_enabled", False)),
-        gpu_util_max_pct=float(thresholds.get("gpu_util_max_pct", 100.0)),
-        memory_free_min_mb=int(thresholds.get("memory_free_min_mb", 8192)),
-        memory_free_min_ratio=float(thresholds.get("memory_free_min_ratio", 0.25)),
-    )
-    if idle_thresholds.memory_free_min_mb < 0:
-        raise ValueError("idle_thresholds.memory_free_min_mb must be >= 0")
-    if not 0 <= idle_thresholds.memory_free_min_ratio <= 1:
-        raise ValueError("idle_thresholds.memory_free_min_ratio must be in [0, 1]")
-
     telemetry_timeout = int(telemetry.get("timeout_seconds", 20))
     telemetry_attempts = int(telemetry.get("max_attempts", 2))
     telemetry_retry_delay = float(telemetry.get("retry_delay_seconds", 2.0))
@@ -193,7 +171,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:  # 读取 YAML 配
 
     return AppConfig(
         monitor=MonitorConfig(**monitor),  # 把 YAML 字段展开为具名配置属性，供各模块统一读取。
-        idle_thresholds=idle_thresholds,
         platform=PlatformConfig(
             page_url=str(platform["page_url"]),
             api_path_contains=str(platform["api_path_contains"]),
@@ -211,11 +188,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:  # 读取 YAML 配
             ),
         ),
         telemetry=TelemetryConfig(
-            endpoint=str(telemetry["endpoint"]),
+            endpoint=_telemetry_endpoint(str(telemetry["endpoint"]), base_dir),
             timeout_seconds=telemetry_timeout,
             max_attempts=telemetry_attempts,
             retry_delay_seconds=telemetry_retry_delay,
             only_online=bool(telemetry.get("only_online", True)),
+            settings_root=base_dir,
         ),
         notification=NotificationConfig(**notification),
         auto_start=AutoStartConfig(
@@ -236,6 +214,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:  # 读取 YAML 配
         ),
         runtime=RuntimeConfig(
             state_file=_resolve_path(base_dir, runtime["state_file"]),
-            log_file=_resolve_path(base_dir, runtime["log_file"]),
         ),
     )
+
+
+def _telemetry_endpoint(fallback, root):
+    from .telemetry_auth import effective_endpoint  # 认证设置与基础 YAML 复用同一资料根。
+    return effective_endpoint(fallback, root)

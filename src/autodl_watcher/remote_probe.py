@@ -99,6 +99,53 @@ def read_log(path):  # 只读普通文件的有限首尾；不加载pickle、检
     return result
 
 
+def read_complete_log(path, identity, limit=4 * 1024 * 1024):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("不是本人普通日志文件")
+        actual_identity = f"{info.st_dev}:{info.st_ino}"
+        if not identity or actual_identity != identity:
+            raise ValueError("日志文件已轮转或身份未核验，请刷新任务后重试")
+        if info.st_size > limit:
+            raise ValueError("训练日志超过单次4 MiB读取上限；请另选日志或在服务器拆分，未截断发送")
+        data = stream.read(limit + 1)  # 训练可继续写入，但读取不能无限追随增长。
+        if len(data) > limit:
+            raise ValueError("训练日志在读取时超过4 MiB，未截断发送")
+        if len(data) < info.st_size:
+            raise ValueError("训练日志在读取时被缩短，请刷新任务后重试")
+    return {"path": str(path), "identity": actual_identity, "size": len(data),
+            "modified_at": info.st_mtime, "content": data.decode("utf-8", "replace")}
+
+
+def _task_for_log(request):
+    pid = request.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        raise ValueError("所选训练任务PID无效")
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    boot_time = int(next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime ")))
+    current = read_process(Path("/proc") / str(pid), boot_id, boot_time, os.sysconf("SC_CLK_TCK"))
+    if not current or current["key"] != request.get("key") or current.get("process_state") == "Z":
+        raise ValueError("所选训练任务已退出或PID身份已变化，未读取日志")
+    project = request.get("project", "").rstrip("/")
+    if project and not (current["cwd"] == project or current["cwd"].startswith(project + "/")):
+        raise ValueError("所选任务不在此连接配置的项目范围内")
+    return current
+
+
+def read_training_log(request):
+    try:
+        current = _task_for_log(request)
+        if request.get("path") not in task_files(current):
+            raise ValueError("所选文件已不属于当前训练任务的关联日志，请刷新任务")
+        result = read_complete_log(request["path"], request.get("identity", ""))
+        _task_for_log(request)  # 读取前后都核对出生身份，不能跨到复用该PID的新训练。
+        return {"operation": "read_log", "log": result}
+    except (OSError, ValueError, KeyError, StopIteration) as exc:
+        message = str(exc) if isinstance(exc, ValueError) else "训练原日志不可读，请刷新任务或检查本人文件权限"
+        return {"operation": "read_log", "error": message}
+
+
 def task_files(process):
     paths = set()
     try:
@@ -204,6 +251,8 @@ def public_gpu_processes(gpus, apps, container, boot_time, ticks):  # 其他用�
     return rows
 
 def collect(request):  # 整次远端请求仅扫描本人进程和已关联日志，无写入、信号或GPU计算。
+    if request.get("operation") == "read_log":
+        return read_training_log(request)  # 用户手动读取日志不重复扫描GPU，也不另开SSH。
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     boot_time = int(next(line.split()[1] for line in Path("/proc/stat").read_text().splitlines() if line.startswith("btime ")))
     ticks = os.sysconf("SC_CLK_TCK")

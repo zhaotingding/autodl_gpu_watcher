@@ -8,7 +8,7 @@ import threading
 import time
 
 from . import ai_credentials
-from .training_ai import (DEFAULTS, AnalysisControl, AnalysisError, analyze, excerpt,
+from .training_ai import (DEFAULTS, AnalysisControl, AnalysisError, analyze, prepare_source,
                           interrupted_call, load_settings, settings)
 from .training_ai_usage import UsageStore
 from .training_rules import RuleError, RuleStore, task_identity
@@ -21,6 +21,8 @@ class _Request:
     config: dict
     control: AnalysisControl
     started_at: float
+    log_path: str
+    log_selected: bool
     call: dict | None = None
     finished: bool = False
     settling: bool = False
@@ -68,7 +70,7 @@ class AIService:
 
     def generate(self, server, card, source, config=None):
         config = settings(config or self.config)
-        source = excerpt(source)
+        source = prepare_source(source, config)  # 预算和脱敏共用后端规则，不再截成最后12000字符。
         if not source.strip() or not card.get("log_path"):
             raise AnalysisError("没有可读日志；继续默认监控")
         identity = task_identity(server, card)
@@ -78,12 +80,11 @@ class AIService:
             if self.busy:
                 raise AnalysisError("已有 AI 请求进行中；继续默认监控，不会重复发送")
             entry = dict(self.store.entries.get(identity, {}))
-            if entry.get("log_path") != card["log_path"]:
-                entry.pop("profile", None)
             entry.update(message="正在更新专用规则" if entry.get("profile") else "默认监控 · 正在生成专用规则",
-                         attempted=True, request_state="running", log_path=card["log_path"])
+                         attempted=True, request_state="running")
             self.store.put(identity, entry)  # 发送前确认尝试状态落盘，重开不能自动重复收费。
-            request = _Request(identity, server.id, config, AnalysisControl(), time.time())
+            request = _Request(identity, server.id, config, AnalysisControl(), time.time(),
+                               card["log_path"], bool(card.get("log_selected", False)))  # 待更新来源随请求保存，不覆盖生效中的来源。
             request.control.on_call = lambda call: self._capture(request, call)
             self._request, self.busy = request, identity
             self.revision += 1
@@ -121,6 +122,10 @@ class AIService:
                 self.usage.record(value["call"])
             except (OSError, sqlite3.Error):
                 value["usage_warning"] = "用量账本保存失败，本次用量仅随任务结果保存"
+        cancelled = bool(request and request.control.cancelled)  # 同一次判定决定整个规则/来源组合，取消不能只阻止来源切换。
+        if cancelled:
+            error = error or "AI 请求已取消；费用可能已产生，未自动重试"
+            value = {key: item for key, item in (value or {}).items() if key in {"call", "usage_warning"}}  # 已知用量仍保存，不采纳取消后的规则结果。
         if error:
             entry["message"] = ("更新失败，保留原专用规则 · " + error.replace("继续默认监控，", "").replace("；继续默认监控", "")
                                 if entry.get("profile") else "默认监控 · " + error)
@@ -131,7 +136,9 @@ class AIService:
                 entry["message"] = "更新失败，AI返回空规则；保留原专用规则，未自动重试"
                 value = {key: item for key, item in value.items() if key not in {"profile", "rule_origin", "generation_note"}}
             entry.update(value)
-        entry.update(attempted=True, request_state="interrupted" if request and request.control.cancelled else "failed" if error else "completed")
+            if request and value.get("profile") and not error:
+                entry.update(log_path=request.log_path, log_selected=request.log_selected)  # 验证后的规则与来源一次落盘，失败仍使用旧组合。
+        entry.update(attempted=True, request_state="interrupted" if cancelled else "failed" if error else "completed")
         try:
             self.store.put(identity, entry)
         except OSError:

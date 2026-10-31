@@ -29,6 +29,7 @@ class TrainingConnection:  # 每个训练监控保留自己的SSH进程；不借
         self.attempts = self.samples = 0
         self._lifecycle = threading.RLock()
         self._request = threading.Lock()
+        self._log_preview = threading.Lock()  # 多个规则窗口也只允许一项原日志读取排队。
 
     def _command(self):
         bootstrap = ('import json,sys;scope={"__name__":"readonly_probe"};'
@@ -93,37 +94,75 @@ class TrainingConnection:  # 每个训练监控保留自己的SSH进程；不借
 
     def collect(self, previous=()):
         with self._request:  # 同一会话只允许一问一答，避免不同轮次的响应串线。
-            with self._lifecycle:
-                fresh = self._open()
-                process, responses = self.process, self._responses
             request = {"project": self.server.project, "scripts": [x.strip() for x in self.server.scripts.split(",") if x.strip()],
                        "previous": list(previous)}
-            message = json.dumps(request, ensure_ascii=False) + "\n"
-            if fresh:
-                message = self._bootstrap_message + message
-            def send():
-                try:
-                    process.stdin.write(message)
-                    process.stdin.flush()
-                except (OSError, ValueError):
-                    responses.put(None)
-            threading.Thread(target=send, daemon=True).start()  # 超时也覆盖握手期间阻塞的管道写入。
+            payload = self._exchange(request)
+            if not isinstance(payload.get("tasks"), list) or not isinstance(payload.get("gpus"), list):
+                self._discard()
+                raise ValueError("服务器监控响应格式错误")
+            self.samples += 1
+            return payload
+
+    def read_log(self, card):
+        if not self._log_preview.acquire(blocking=False):
+            raise ValueError("此服务器已有原日志读取，请等待完成后重试")
+        try:
+            return self._read_log(card)
+        finally:
+            self._log_preview.release()
+
+    def _read_log(self, card):
+        with self._request:
+            request = {"operation": "read_log", "project": self.server.project,
+                       "pid": card["pid"], "key": card["key"], "path": card["log_path"],
+                       "identity": card.get("log_identity", "")}
+            payload = self._exchange(request, allow_open=False)  # 不为手动读日志新建或重拨SSH。
+            if payload.get("operation") != "read_log":
+                self._discard()
+                raise ValueError("训练原日志响应格式错误")
+            if payload.get("error"):
+                raise ValueError(payload["error"])  # 文件超限等可恢复错误不关闭健康会话。
+            log = payload.get("log")
+            if (not isinstance(log, dict) or log.get("path") != card["log_path"]
+                    or log.get("identity") != card.get("log_identity") or not isinstance(log.get("content"), str)):
+                self._discard()
+                raise ValueError("训练原日志响应来源不一致")
+            return log
+
+    def _exchange(self, request, allow_open=True):
+        with self._lifecycle:
+            if allow_open:
+                fresh = self._open()
+            else:
+                if self.closed or self.process is None or self.process.poll() is not None:
+                    raise OSError("没有可复用的训练SSH会话；请先开始该服务器的训练监控")
+                fresh = False
+            process, responses = self.process, self._responses
+        message = json.dumps(request, ensure_ascii=False) + "\n"
+        if fresh:
+            message = self._bootstrap_message + message
+        def send():
             try:
-                line = responses.get(timeout=self.TIMEOUT)
-                if line is None:
-                    self._stderr_thread.join(timeout=1)
-                    raise OSError(self._error())
-                payload = json.loads(line)
-                if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list) or not isinstance(payload.get("gpus"), list):
-                    raise ValueError("服务器监控响应格式错误")
-                self.samples += 1
-                return payload
-            except queue.Empty:
-                self._discard()
-                raise OSError("SSH采集超时，本次连接已关闭") from None
+                process.stdin.write(message)
+                process.stdin.flush()
             except (OSError, ValueError):
-                self._discard()
-                raise
+                responses.put(None)
+        threading.Thread(target=send, daemon=True).start()  # 同一管道同时覆盖采样和手动日志的超时。
+        try:
+            line = responses.get(timeout=self.TIMEOUT)
+            if line is None:
+                self._stderr_thread.join(timeout=1)
+                raise OSError(self._error())
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError("服务器响应格式错误")
+            return payload
+        except queue.Empty:
+            self._discard()
+            raise OSError("SSH采集超时，本次连接已关闭") from None
+        except (OSError, ValueError):
+            self._discard()
+            raise
 
     def _discard(self):
         with self._lifecycle:

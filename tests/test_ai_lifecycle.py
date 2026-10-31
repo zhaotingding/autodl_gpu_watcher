@@ -12,6 +12,8 @@ from autodl_watcher.ai_service import AIService
 from autodl_watcher.training_config import TrainingServer
 from autodl_watcher.training_ai import AnalysisControl, AnalysisError, analyze, interrupted_call, settings
 from autodl_watcher.training_rules import RuleStore, task_identity
+from autodl_watcher.training_tracker import TrainingTracker
+from test_training import snapshot
 from test_training_ai import CONFIG, RESULT, SOURCE, sse
 from test_training_ai_usage import CONFIG_PRICE, USAGE
 
@@ -67,6 +69,78 @@ class AILifecycleTest(unittest.TestCase):
         self.assertEqual(ai.store.entries[identity]["request_state"], "completed")
         self.assertEqual(len(ai.usage.records()), 1)
 
+    def test_failed_source_switch_keeps_active_profile_and_source_on_disk(self):
+        for outcome in ("failure", "timeout", "empty"):
+            with self.subTest(outcome=outcome):
+                self.release.clear()
+                def analyzer(config, source, pid, **kwargs):
+                    self.release.wait(2)
+                    if outcome == "empty":
+                        return {"profile": RESULT, "rule_origin": "local"}
+                    raise AnalysisError("请求超时" if outcome == "timeout" else "规则验证失败")
+                ai = AIService(self.path, analyzer)
+                identity = task_identity(self.server, self.card)
+                active = {"profile": RESULT, "log_path": self.card["log_path"], "log_selected": False}
+                ai.store.put(identity, active)
+                selected = dict(self.card, log_path="/mock/another.log", log_selected=True)
+                ai.generate(self.server, selected, SOURCE, CONFIG)
+                try:
+                    pending = RuleStore(ai.store.path).entries[identity]
+                    for key, value in active.items():
+                        self.assertEqual(pending[key], value)  # 在途状态也不能暂时换掉正在生效的规则或来源。
+                    self.assertEqual(pending["request_state"], "running")
+                finally:
+                    self.release.set()
+                self.wait_for(lambda: not ai.busy)
+                restored = AIService(self.path).rule_entry(self.server, self.card)
+                for key, value in active.items():
+                    self.assertEqual(restored[key], value)
+                self.assertIn("保留原专用规则", restored["message"])
+
+    def test_successful_source_switch_commits_profile_and_source_together(self):
+        updated = dict(RESULT, name="新日志专用规则")
+        def analyzer(config, source, pid, **kwargs):
+            self.release.wait(2)
+            return {"profile": updated}
+        ai = AIService(self.path, analyzer)
+        identity = task_identity(self.server, self.card)
+        ai.store.put(identity, {"profile": RESULT, "log_path": self.card["log_path"], "log_selected": False})
+        selected = dict(self.card, log_path="/mock/another.log", log_selected=True)
+        ai.generate(self.server, selected, SOURCE, CONFIG)
+        self.assertEqual(ai.rule_entry(self.server, self.card)["log_path"], self.card["log_path"])
+        self.release.set()
+        self.wait_for(lambda: not ai.busy)
+        restored = AIService(self.path)
+        entry = restored.rule_entry(self.server, selected)
+        self.assertEqual(entry["profile"], updated)
+        self.assertEqual(entry["log_path"], selected["log_path"])
+        self.assertTrue(entry["log_selected"])
+        value = snapshot(SOURCE)
+        task = value["tasks"][0]
+        task.update(key=self.card["key"])
+        task["logs"][0]["path"] = self.card["log_path"]
+        task["logs"].append(dict(task["logs"][0], path=selected["log_path"], head=SOURCE.replace("0.81", "0.92")))
+        card = TrainingTracker(self.server, lambda task: restored.rule_entry(self.server, task)).update(value)["cards"][0]
+        self.assertEqual(card["log_path"], selected["log_path"])
+        self.assertIn("专用规则已启用：新日志专用规则", card["rule_status"])
+        self.assertEqual(card["progress"]["train"]["metrics"]["Dice"], .92)  # 后续采样确实解析新来源的新值。
+
+    def test_source_switch_save_failure_retains_old_profile_and_source(self):
+        def analyzer(config, source, pid, **kwargs):
+            self.release.wait(2)
+            return {"profile": dict(RESULT, name="不能保存的新规则")}
+        ai = AIService(self.path, analyzer)
+        identity = task_identity(self.server, self.card)
+        active = {"profile": RESULT, "log_path": self.card["log_path"], "log_selected": False}
+        ai.store.put(identity, active)
+        ai.generate(self.server, dict(self.card, log_path="/mock/another.log", log_selected=True), SOURCE, CONFIG)
+        with patch.object(ai.store, "put", side_effect=OSError("mock read-only")):
+            self.release.set()
+            self.wait_for(lambda: not ai.busy)
+        for entry in (ai.rule_entry(self.server, self.card), RuleStore(ai.store.path).entries[identity]):
+            for key, value in active.items():
+                self.assertEqual(entry[key], value)
+
     def test_stalled_request_close_preserves_old_rule_and_known_usage(self):
         started = threading.Event()
         def analyzer(config, source, pid, control=None):
@@ -77,19 +151,22 @@ class AILifecycleTest(unittest.TestCase):
             return {"profile": {"name": "late-result"}, "call": self.call()}
         ai = AIService(self.path, analyzer)
         identity = task_identity(self.server, self.card)
-        ai.store.put(identity, {"profile": RESULT, "log_path": self.card["log_path"]})
-        ai.generate(self.server, self.card, SOURCE, CONFIG_PRICE)
+        ai.store.put(identity, {"profile": RESULT, "log_path": self.card["log_path"], "log_selected": False})
+        ai.generate(self.server, dict(self.card, log_path="/mock/another.log", log_selected=True), SOURCE, CONFIG_PRICE)
         self.assertTrue(started.wait(1))
         ai.begin_shutdown(grace_seconds=0)
         self.wait_for(ai.shutdown_complete)
         entry = RuleStore(ai.store.path).entries[identity]
         self.assertEqual(entry["request_state"], "interrupted")
         self.assertEqual(entry["profile"], RESULT)
+        self.assertEqual(entry["log_path"], self.card["log_path"])
+        self.assertFalse(entry["log_selected"])
         self.assertEqual(entry["call"]["tokens"]["input"], 1000)
         self.assertTrue(entry["attempted"])
         self.release.set(); self.assertTrue(self.finished.wait(1)); time.sleep(.02)
         self.assertEqual(len(ai.usage.records()), 1)
         self.assertEqual(ai.store.entries[identity]["profile"], RESULT)
+        self.assertEqual(ai.store.entries[identity]["log_path"], self.card["log_path"])
 
     def test_cancelled_request_without_usage_is_unknown_and_not_retried(self):
         started = threading.Event()
@@ -107,6 +184,35 @@ class AILifecycleTest(unittest.TestCase):
         self.assertIsNone(call["cny"])
         self.assertEqual(ai.rule_entry(self.server, self.card)["request_state"], "interrupted")
         self.assertEqual(ai.store.entries[identity]["attempted"], True)
+
+    def test_cancel_after_normal_finish_claims_settling_keeps_old_profile_and_source(self):
+        settling = threading.Event()
+        def analyzer(config, source, pid, **kwargs):
+            return {"profile": dict(RESULT, name="已取消的新规则"), "model": "cancelled-model", "call": self.call()}
+        ai = AIService(self.path, analyzer)
+        identity = task_identity(self.server, self.card)
+        active = {"profile": RESULT, "log_path": self.card["log_path"], "log_selected": False, "model": "old-model"}
+        ai.store.put(identity, active)
+        original = ai.usage.record
+        def paused_record(call):
+            settling.set()
+            self.release.wait(2)  # 正常结果已占 settling；在规则落盘前精确插入取消。
+            original(call)
+        with patch.object(ai.usage, "record", side_effect=paused_record):
+            ai.generate(self.server, dict(self.card, log_path="/mock/another.log", log_selected=True), SOURCE, CONFIG_PRICE)
+            self.assertTrue(settling.wait(1))
+            self.assertTrue(ai._request.settling)
+            ai._cancel_pending(ai._request)  # 该收尾因 settling 返回，正常收尾仍须观察取消信号。
+            self.assertTrue(ai._request.control.cancelled)
+            self.release.set()
+            self.wait_for(lambda: not ai.busy)
+        for entry in (ai.rule_entry(self.server, self.card), RuleStore(ai.store.path).entries[identity]):
+            for key, value in active.items():
+                self.assertEqual(entry[key], value)
+            self.assertEqual(entry["request_state"], "interrupted")
+            self.assertIn("保留原专用规则", entry["message"])
+        self.assertEqual(len(ai.usage.records()), 1)
+        self.assertEqual(ai.usage.records()[0]["tokens"]["input"], 1000)
 
     def test_usage_metadata_is_captured_before_stream_failure_and_own_socket_shutdown(self):
         control = AnalysisControl()

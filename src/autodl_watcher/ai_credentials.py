@@ -35,16 +35,29 @@ def _api():
 
 
 def _target(url: str) -> str:
-    return "autodl-watcher/llm/" + url
+    return _secret_target("llm", url)  # 保留已保存 AI 密钥的原目标名称。
+
+
+def _secret_target(namespace: str, identifier: str) -> str:
+    if not namespace or "/" in namespace or not identifier or "\x00" in namespace + identifier:
+        raise CredentialError("凭据命名空间或标识无效")
+    return f"autodl-watcher/{namespace}/{identifier}"  # 各用途隔离，避免站点密码覆盖 AI 密钥。
 
 
 def save(url: str, key: str) -> None:
     key = key.strip()
     if not key or any(c.isspace() for c in key) or len(key.encode("utf-8")) > 2500:
         raise CredentialError("密钥为空、包含空白或长度不合法")
+    save_secret("llm", url, key)
+
+
+def save_secret(namespace: str, identifier: str, value: str) -> None:
+    """保存独立用途的秘密；密码空白字符保留，不按 API token 规则裁剪。"""
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 2500:
+        raise CredentialError("凭据为空或长度不合法")
     dll = _api()
-    blob = (ctypes.c_ubyte * len(key.encode("utf-8"))).from_buffer_copy(key.encode("utf-8"))
-    credential = _Credential(Type=1, TargetName=_target(url), CredentialBlobSize=len(blob),
+    blob = (ctypes.c_ubyte * len(value.encode("utf-8"))).from_buffer_copy(value.encode("utf-8"))
+    credential = _Credential(Type=1, TargetName=_secret_target(namespace, identifier), CredentialBlobSize=len(blob),
                              CredentialBlob=blob, Persist=2, UserName="autodl-watcher")
     try:
         if not dll.CredWriteW(ctypes.byref(credential), 0):
@@ -54,9 +67,13 @@ def save(url: str, key: str) -> None:
 
 
 def read(url: str) -> str:
+    return read_secret("llm", url)
+
+
+def read_secret(namespace: str, identifier: str) -> str:
     dll = _api()
     pointer = ctypes.POINTER(_Credential)()
-    if not dll.CredReadW(_target(url), 1, 0, ctypes.byref(pointer)):
+    if not dll.CredReadW(_secret_target(namespace, identifier), 1, 0, ctypes.byref(pointer)):
         if ctypes.get_last_error() == 1168:
             return ""
         raise CredentialError("Windows 无法读取密钥，请检查当前登录用户")
@@ -69,5 +86,9 @@ def read(url: str) -> str:
 
 
 def delete(url: str) -> None:
-    if not _api().CredDeleteW(_target(url), 1, 0) and ctypes.get_last_error() != 1168:
+    delete_secret("llm", url)
+
+
+def delete_secret(namespace: str, identifier: str) -> None:
+    if not _api().CredDeleteW(_secret_target(namespace, identifier), 1, 0) and ctypes.get_last_error() != 1168:
         raise CredentialError("Windows 无法删除该接口的密钥")

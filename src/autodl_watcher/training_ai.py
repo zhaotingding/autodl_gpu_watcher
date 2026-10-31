@@ -16,6 +16,7 @@ from .training_ai_usage import pricing_settings, tokens, estimate
 from .yaml_settings import read_settings, settings_source, write_settings
 
 DEFAULTS = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "service_tier": "flex"}
+DEFAULT_LOG_CHARS = 200000  # 手动输入预算可配置；超出时拒绝发送，不静默截掉训练阶段。
 
 
 class AnalysisError(ValueError):
@@ -85,6 +86,12 @@ def settings(values):
     result["prompt"] = str(values.get("prompt", DEFAULT_PROMPT)).strip()
     if not result["prompt"] or len(result["prompt"]) > 12000:
         raise AnalysisError("全局提示词须为1至12000字符")
+    try:
+        result["max_log_chars"] = int(values.get("max_log_chars", DEFAULT_LOG_CHARS))
+    except (TypeError, ValueError):
+        raise AnalysisError("单次日志字符上限须为整数") from None
+    if not 1000 <= result["max_log_chars"] <= 2000000:
+        raise AnalysisError("单次日志字符上限须为1000至2000000；请按模型上下文和费用选择")
     result["pricing"] = pricing_settings({**result, **({"pricing": values["pricing"]} if "pricing" in values else {})})
     return result
 
@@ -104,10 +111,18 @@ def save_settings(path, values, key=""):
 
 
 def excerpt(text):
-    text = ANSI_ESCAPE.sub("", text)[-12000:]  # 与监控解析共用颜色清理，随后按原上限截取并脱敏。
+    text = ANSI_ESCAPE.sub("", text)  # 仅去色和脱敏；完整训练日志不能在这里被静默截断。
     text = re.sub(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?)(?:bearer\s+)?[^\s,\"'}]+", r"\1[已隐藏]", text)
     text = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|password|secret)[\"']?\s*[:=]\s*[\"']?)[^\s,\"'}]+", r"\1[已隐藏]", text)
     return re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "[已隐藏]", text)
+
+
+def prepare_source(text, config):
+    source = excerpt(text)
+    limit = config.get("max_log_chars", DEFAULT_LOG_CHARS)
+    if len(source) > limit:
+        raise AnalysisError(f"日志共{len(source):,}字符，超过本次上限{limit:,}；请删减预览或在全局AI设置提高上限，未发送请求")
+    return source
 
 
 DEFAULT_PROMPT = """为这个训练进程生成可在后续采样重复使用的监控规则，不要只做一次性摘要。
@@ -203,7 +218,7 @@ def analyze(config, source, pid=None, *, control=None):
     config = settings(config)  # 每次请求使用启动时的配置快照。
     if control:
         control.check()
-    source = excerpt(source)
+    source = prepare_source(source, config)
     log_pids = set()
     for line in source.splitlines():
         start = line.find("{")

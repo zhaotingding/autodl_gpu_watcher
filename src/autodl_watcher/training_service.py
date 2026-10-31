@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import threading
 import time
 
@@ -34,6 +35,32 @@ class TrainingService:
     def snapshot(self, server_id):
         state = self.states.get(server_id)
         return state.get("snapshot") if state else None
+
+    def read_log(self, server_id, card):
+        return self.prepare_log_read(server_id, card)()  # 保留同步入口；界面先在主线程准备，再后台执行作业。
+
+    def prepare_log_read(self, server_id, card):
+        state = self.states.get(server_id)
+        current = next((item for item in (state.get("snapshot") or {}).get("cards", [])
+                        if item["key"] == card["key"]), None) if state else None
+        if not current or not current.get("alive") or current.get("history"):
+            raise ValueError("所选任务已不是当前存活训练，请刷新后读取其原日志")
+        candidates = {item["path"]: item for item in current.get("log_sources", [])}
+        source = candidates.get(card.get("log_path"))
+        if source is None or not source.get("identity") or source.get("identity") != card.get("log_identity"):
+            raise ValueError("所选日志身份尚未核验或已变化，请等待下次采样后重试")
+        return partial(state["connection"].read_log, dict(card))  # 只持连接和卡片副本，不把服务及其Tk视图带入后台。
+
+    def network_targets(self):
+        targets = {}
+        for state in self.states.values():
+            connection = state["connection"]
+            process = connection.process
+            if process is not None and process.poll() is None:
+                server = connection.server  # 使用实际活动连接，不能用尚未生效的pending配置。
+                targets[process.pid] = {"purpose": f"训练 SSH · {server.name}",
+                                        "target": f"ssh://{server.ssh_alias}", "kind": "SSH"}
+        return targets
 
     def monitored_snapshots(self):
         return [(key, state["snapshot"]) for key, state in self.states.items()

@@ -121,7 +121,8 @@ class PackageLayoutTest(unittest.TestCase):
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue((folder / "state.json").is_file())
-            self.assertIn(str(folder / "config.yaml"), result.stdout)
+            self.assertIn("模式：仅监控", result.stdout)
+            self.assertFalse((folder / "watcher.log").exists())
             self.assertFalse((folder / "runtime/browser_profile").exists())
             self.assertFalse((folder / "_internal").exists())
 

@@ -10,7 +10,7 @@ def format_alert(alert: AvailabilityAlert) -> str:  # 将 AvailabilityAlert 格�
         f"物理主机：{alert.host}",
         f"平台可分配 GPU ID：{alert.platform_free_count}/{alert.platform_total_count}",
         f"物理 GPU INDEX 数：{alert.physical_total_count}",
-        f"显存达标 GPU INDEX 数：{alert.actionable_count}",
+        f"新鲜 GPU 样本数：{alert.actionable_count}",
     ]
     if alert.platform_sources:
         lines.append(f"可见平台入口：{', '.join(alert.platform_sources)}")
@@ -24,7 +24,7 @@ def format_alert(alert: AvailabilityAlert) -> str:  # 将 AvailabilityAlert 格�
                 f"可用显存：{free_mb} / {gpu.memory_total_mb} MB",
                 f"已用显存：{gpu.memory_used_mb} MB",
                 f"GPU Util（仅参考）：{gpu.util_pct:.0f}%",
-                f"持续满足容量条件：{gpu.idle_seconds} 秒",
+                f"平台空位连续确认：{gpu.idle_seconds} 秒",
                 f"采样时间：{gpu.observed_at:%Y-%m-%d %H:%M:%S}",
                 "",
             ]

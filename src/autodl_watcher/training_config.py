@@ -18,9 +18,10 @@ class TrainingServer:  # SSH凭据仍由用户的OpenSSH管理，本地配置只
     ssh_alias: str
     python: str = "python3"
     project: str = ""
-    entry: str = ""  # 非空时绑定AutoDL入口；空值表示独立服务器页。
+    entry: str = ""  # 非空时绑定AutoDL入口；标签是否常驻由pinned独立决定。
     scripts: str = DEFAULT_SCRIPTS
     stalled_minutes: float = 120
+    pinned: bool = False  # 新服务器由用户选择是否固定到主窗口标签，不按名称预设。
 
     def validate(self):
         if not self.id or not self.name.strip() or not re.fullmatch(r"[\w.@:-]+", self.ssh_alias) or self.ssh_alias.startswith("-"):
@@ -33,6 +34,8 @@ class TrainingServer:  # SSH凭据仍由用户的OpenSSH管理，本地配置只
             raise ValueError("AutoDL入口应为autodl-203-1这样的编号")
         if not self.scripts.strip() or not math.isfinite(float(self.stalled_minutes)) or float(self.stalled_minutes) <= 0:
             raise ValueError("训练脚本名及无进展提醒时间必须有效")
+        if not isinstance(self.pinned, bool):
+            raise ValueError("固定到顶部标签必须为布尔值")
         return self
 
 
@@ -41,6 +44,7 @@ def load_servers(path):
         return []
     data = read_settings(path)
     for item in data:
+        item.setdefault("pinned", True)  # 旧配置保留已有可见页，仅内存兼容，不自动改写个人文件。
         if {name.strip() for name in item.get("scripts", "").split(",")} == {"train.py", "trainer.py", "train_net.py"}:
             item["scripts"] = DEFAULT_SCRIPTS  # 仅迁移旧默认值，不放宽用户自定义范围，也不改写文件。
     servers = [TrainingServer(**item).validate() for item in data]

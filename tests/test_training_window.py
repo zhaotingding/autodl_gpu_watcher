@@ -26,7 +26,7 @@ class TrainingWindowTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.folder = Path(self.temp.name)
         shutil.copyfile(Path(__file__).parent / "fixtures/monitor.yaml", self.folder / "config.yaml")
-        self.servers = [TrainingServer("s", "203-1", "server", entry="autodl-203-1"), TrainingServer("external", "4090", "other")]
+        self.servers = [TrainingServer("s", "203-1", "server", entry="autodl-203-1", pinned=True), TrainingServer("external", "4090", "other", pinned=True)]
         save_servers(self.folder / ".ui/servers.yaml", self.servers)
         self.location = patch.object(gui, "ROOT", self.folder)
         self.location.start()
@@ -36,7 +36,7 @@ class TrainingWindowTest(unittest.TestCase):
         self.root.withdraw()
         self.window = gui.WatcherWindow(self.root, debug=True)
         self.window.table.selection_set("autodl-203-1")
-        self.window._render_gpus()
+        self.pane = self.window.external_panes["s"][2]  # 绑定入口也有独立训练页，不再放进平台资源页。
 
     def tearDown(self):
         self.window.training.stop_all()
@@ -55,19 +55,80 @@ class TrainingWindowTest(unittest.TestCase):
         return [str(item.cget("text")) for item in descendants(pane) if isinstance(item, (tk.Label, gui.ttk.Label, gui.ttk.Button))]
 
     def test_tabs_and_selection_do_not_start_network_or_power(self):
-        self.assertEqual([self.window.notebook.tab(tab, "text") for tab in self.window.notebook.tabs()], ["AutoDL 平台", "4090"])
-        self.assertEqual(self.window.title_text.get(), "203-1")
-        self.assertEqual(self.window.training_pane.server_id, "s")
+        self.assertEqual([self.window.notebook.tab(tab, "text") for tab in self.window.notebook.tabs()], ["AutoDL 平台", "4090", "203-1"])
+        self.assertEqual(self.window.title_text.get(), "AutoDL 平台算力")
+        self.assertEqual(self.pane.server_id, "s")
+        self.assertFalse(hasattr(self.window, "training_pane"))
         self.window.notebook.select(self.window.external_panes["external"][0])
         self.assertFalse(any(state["active"] for state in self.window.training.states.values()))
         self.assertFalse(any("开机" in text for text in self.texts(self.window.external_panes["external"][2])))
         self.window.table.selection_set("autodl-203-2")
-        self.window._render_gpus()
-        self.assertEqual(self.window.title_text.get(), "203-2")
-        self.assertIsNone(self.window.training_pane.server_id)
+        self.window._render_resources()
+        self.assertEqual(self.window.title_text.get(), "AutoDL 平台算力")
+        self.assertEqual(self.pane.server_id, "s")  # 资源行选择不会切换训练页的服务器。
+
+    def test_new_unpinned_server_is_available_in_settings_without_creating_a_tab(self):
+        from unittest.mock import Mock
+        server = TrainingServer("new", "任意新增服务器", "new-host")
+        self.window.open_settings("servers")
+        with patch.object(self.window.training, "start") as start:
+            self.window.save_server(server)
+        self.assertFalse(server.pinned)
+        self.assertNotIn(server.id, self.window.external_panes)
+        self.assertTrue(self.window.settings_window.servers.exists(server.id))
+        self.assertEqual(self.window.settings_window.servers.item(server.id, "text"), server.name)
+        start.assert_not_called()
+
+    def test_pin_and_unpin_preserve_active_connection_and_snapshot(self):
+        from dataclasses import replace
+        self.window.open_settings("servers")
+        state = self.window.training.states["s"]
+        state.update(active=True, due=float("inf"), snapshot=state["tracker"].update(snapshot()))
+        connection, current = state["connection"], state["snapshot"]
+        with patch.object(self.window.training, "register") as register, patch.object(self.window.training, "stop") as stop:
+            self.window.save_server(replace(self.servers[0], pinned=False))
+            self.assertEqual(self.window.notebook.tab(self.window.external_panes["s"][0], "state"), "hidden")
+            self.assertTrue(state["active"])
+            self.assertIs(state["connection"], connection)
+            self.assertIs(state["snapshot"], current)
+            self.assertIsNone(state["pending"])
+            self.window.save_server(replace(self.servers[0], pinned=True))
+            self.assertEqual(self.window.notebook.tab(self.window.external_panes["s"][0], "state"), "normal")
+            register.assert_not_called()
+            stop.assert_not_called()
+
+    def test_unpinned_server_can_be_opened_temporarily_and_hidden_without_starting(self):
+        from autodl_watcher.training_config import load_servers
+        server = TrainingServer("temporary", "临时查看", "temporary-host")
+        self.window.open_settings("servers")
+        self.window.save_server(server)
+        with patch.object(self.window.training, "start") as start, patch.object(self.window.training, "stop") as stop:
+            self.window.open_training(server.id)
+            page, _, pane = self.window.external_panes[server.id]
+            self.assertEqual(self.window.notebook.select(), str(page))
+            self.assertEqual(pane.server_id, server.id)
+            self.assertFalse(next(item for item in load_servers(self.window.server_file) if item.id == server.id).pinned)
+            self.window.hide_training(server.id)
+            self.assertEqual(self.window.notebook.tab(page, "state"), "hidden")
+            self.window.open_training(server.id)
+            self.assertIs(self.window.external_panes[server.id][2], pane)
+            start.assert_not_called()
+            stop.assert_not_called()
+
+    def test_server_form_saves_pin_selection_for_arbitrary_server(self):
+        from autodl_watcher.training_config import load_servers
+        self.window.edit_server("s")
+        dialog = self.window.settings_window
+        pin = next(item for item in descendants(dialog.server_form)
+                   if isinstance(item, gui.ttk.Checkbutton) and item.cget("text") == "固定到顶部标签")
+        pin.invoke()
+        next(item for item in descendants(dialog.server_form)
+             if isinstance(item, gui.ttk.Button) and item.cget("text") == "保存连接").invoke()
+        self.assertFalse(load_servers(self.window.server_file)[0].pinned)
+        self.assertEqual(self.window.notebook.tab(self.window.external_panes["s"][0], "state"), "hidden")
 
     def test_card_states_preserve_metrics_and_disconnection_is_not_idle(self):
-        pane = self.window.training_pane
+        pane = self.pane
         state = self.window.training.states["s"]
         state["active"] = True
         for text, alive, level, label in [(LOG, True, "success", "正在测试"),
@@ -95,10 +156,28 @@ class TrainingWindowTest(unittest.TestCase):
         pane.render()
         self.assertIn("无匹配训练进程", self.texts(pane))
 
+    def test_platform_start_and_stop_do_not_start_or_stop_training_pages(self):
+        from unittest.mock import Mock
+        state = self.window.training.states["s"]
+        state.update(active=True, due=float("inf"))
+        def launched(command, job):
+            self.window.process, self.window.job = Mock(), job
+        with patch.object(self.window, "_launch", side_effect=launched) as launch, \
+             patch.object(self.window.training, "start") as start_training, \
+             patch.object(self.window.training, "stop") as stop_training:
+            self.window.start()
+            launch.assert_called_once()
+            self.window.stop()
+            self.assertTrue(self.window.stop_file.exists())
+            self.assertTrue(state["active"])
+            start_training.assert_not_called()
+            stop_training.assert_not_called()
+        self.window.process = None  # 此用例未创建真实平台进程，避免收尾等待一个 Mock。
+
     def test_stop_one_page_does_not_stop_another_and_close_waits_for_read(self):
         for state in self.window.training.states.values():
             state.update(active=True, due=float("inf"))
-        self.window.training_pane.stop()
+        self.pane.stop()
         self.assertFalse(self.window.training.states["s"]["active"])
         self.assertTrue(self.window.training.states["external"]["active"])
         state = self.window.training.states["external"]
@@ -114,7 +193,7 @@ class TrainingWindowTest(unittest.TestCase):
 
     def test_busy_and_other_ai_revision_do_not_rebuild_visible_cards(self):
         from types import SimpleNamespace
-        pane = self.window.training_pane
+        pane = self.pane
         service = self.window.training
         pane.service = SimpleNamespace(status=service.status, snapshot=service.snapshot, server=service.server, ai=service.ai)  # 视图仅需公开查询接口。
         state = service.states["s"]
@@ -135,7 +214,7 @@ class TrainingWindowTest(unittest.TestCase):
         self.assertNotEqual(pane.content.winfo_children(), frames)
 
     def test_black_gpu_log_and_failure_card_stay_visible_after_disconnect_and_stop(self):
-        pane = self.window.training_pane
+        pane = self.pane
         state = self.window.training.states["s"]
         state["active"] = True
         value = snapshot(LOG + "RuntimeError: CUDA out of memory")
@@ -156,11 +235,11 @@ class TrainingWindowTest(unittest.TestCase):
         self.assertEqual(pane.content.winfo_children()[-1].cget("background"), COLORS["error"][0])
         self.assertIn("上次数据不作为当前状态", pane.gpu_log.get("1.0", "end"))
 
-    def test_instance_and_ssh_columns_are_independent_and_unknown_is_readonly(self):
+    def test_power_eligibility_is_independent_from_resource_columns_and_training(self):
         window = self.window
         window._populate([("autodl-203-1", "0/2", "可开机"), ("autodl-203-2", "0/2", "可开机"), ("autodl-202-2", "3/3", "无实例")])
-        self.assertEqual(window.table.set("autodl-203-1", "training"), "待连接")
-        self.assertEqual(window.table.set("autodl-203-2", "training"), "未配置")
+        self.assertNotIn("training", window.table.cget("columns"))
+        self.assertNotIn("target", window.table.cget("columns"))
         window.live.set(True); window.convert_no_gpu.set(True)
         window.table.selection_set("autodl-202-2")
         self.assertIn("--monitor-only", window._command())
@@ -169,8 +248,9 @@ class TrainingWindowTest(unittest.TestCase):
         self.assertIn("--live", window._command())
         state = window.training.states["s"]
         state.update(active=True, snapshot=state["tracker"].update(snapshot()))
-        window._training_columns()
-        self.assertEqual(window.table.set("autodl-203-1", "training"), "已连接")
+        self.pane.render()
+        self.assertEqual(self.pane.server_id, "s")
+        self.assertEqual(window.power_eligibility["autodl-203-1"], "可开机")
 
     def test_pending_config_can_be_saved_while_platform_and_training_are_running(self):
         from unittest.mock import Mock
@@ -180,7 +260,7 @@ class TrainingWindowTest(unittest.TestCase):
         state.update(active=True, busy=True, snapshot=state["tracker"].update(snapshot(now=time.time())))
         window.process, window.job = Mock(), "monitor"
         old = state["server"]
-        window.configure_training("autodl-203-1")
+        window.edit_server("s")
         dialog = next(child for child in self.root.winfo_children() if isinstance(child, tk.Toplevel))
         fields = [child for child in descendants(dialog.server_form) if isinstance(child, gui.ttk.Entry)]
         fields[1].delete(0, "end"); fields[1].insert(0, "replacement")
@@ -190,20 +270,19 @@ class TrainingWindowTest(unittest.TestCase):
         self.assertEqual(state["server"], old)
         self.assertTrue(state["active"] and state["busy"])
         self.assertEqual(state["pending"].ssh_alias, "replacement")
-        self.assertEqual(window.table.set("autodl-203-1", "training"), "已存待用")
-        self.assertIn("下次启动训练监控生效", window.training_pane.summary.cget("text"))
+        self.assertIn("下次启动训练监控生效", self.pane.summary.cget("text"))
         window.process = None; state["busy"] = False
 
-    def test_ssh_cell_opens_clicked_server_without_switching_running_entry(self):
-        from types import SimpleNamespace
+    def test_resource_selection_does_not_edit_or_retarget_running_training(self):
         from unittest.mock import Mock
         window = self.window
         window.process = Mock()
-        with patch.object(window.table, "identify_row", return_value="autodl-203-2"), patch.object(window.table, "identify_column", return_value="#4"), patch.object(window, "edit_server") as editor:
-            self.assertEqual(window._table_click(SimpleNamespace(x=0, y=0)), "break")
-            editor.assert_called_once_with(None, "autodl-203-2")
-        self.assertEqual(window.selected_entry(), "autodl-203-1")
-        self.assertEqual(window.training_pane.server_id, "s")
+        with patch.object(window, "edit_server") as editor:
+            window.table.selection_set("autodl-203-2")
+            window._render_resources()
+            editor.assert_not_called()
+        self.assertEqual(window.selected_entry(), "autodl-203-2")
+        self.assertEqual(self.pane.server_id, "s")
         window.process = None
 
     def test_failed_config_write_does_not_change_running_or_saved_settings(self):
@@ -223,7 +302,7 @@ class TrainingWindowTest(unittest.TestCase):
         dialog.destroy()
 
     def test_card_packs_status_timestamp_and_memory_into_existing_rows(self):
-        pane = self.window.training_pane
+        pane = self.pane
         state = self.window.training.states["s"]
         value = snapshot(now=time.time()); value["tasks"][0]["gpu_memory_mb"] = 6144
         state.update(active=True, snapshot=state["tracker"].update(value))
@@ -237,7 +316,7 @@ class TrainingWindowTest(unittest.TestCase):
 
     def test_structured_branch_metrics_peak_memory_and_error_color(self):
         from test_v083 import TRAIN, NOW
-        pane = self.window.training_pane
+        pane = self.pane
         state = self.window.training.states["s"]
         state["active"] = True
         state["snapshot"] = state["tracker"].update(snapshot(TRAIN, now=NOW))
@@ -252,7 +331,7 @@ class TrainingWindowTest(unittest.TestCase):
         self.assertTrue(any("NaN/Inf" in text for text in self.texts(pane)))
 
     def test_empty_match_explains_current_script_and_directory_filters(self):
-        pane = self.window.training_pane
+        pane = self.pane
         state = self.window.training.states["s"]
         value = snapshot(); value["tasks"] = []
         state.update(active=True, snapshot=state["tracker"].update(value))

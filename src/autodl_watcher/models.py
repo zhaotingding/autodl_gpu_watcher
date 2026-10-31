@@ -54,7 +54,7 @@ class ConfirmedGpu:  # 经 evaluator 确认已连续满足容量条件的 GPU。
     util_pct: float
     memory_used_mb: int
     memory_total_mb: int
-    idle_seconds: int         # 已连续满足显存条件的秒数
+    idle_seconds: int         # 平台空位与新鲜样本的连续确认秒数
     observed_at: datetime
 
 

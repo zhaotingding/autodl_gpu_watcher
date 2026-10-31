@@ -2,7 +2,7 @@
 from unittest import TestCase
 from unittest.mock import Mock
 
-from autodl_watcher.network_monitor import NetworkMonitor
+from autodl_watcher.network_monitor import NetworkMonitor, safe_target
 from autodl_watcher.network_system import ProcessInfo, SocketInfo, SystemSnapshot
 
 
@@ -19,6 +19,20 @@ def snapshot(processes, sockets=(), now=100, errors=()):
 
 
 class NetworkMonitorTest(TestCase):
+    def test_logical_ssh_target_and_configured_http_urls_are_not_conflated(self):
+        reader = Mock(return_value=snapshot([process(1, 0), process(2, 1, "ssh.exe", 11)],
+                                           [connection(2, 41942), connection(1)], 100))
+        monitor = NetworkMonitor(1, reader=reader)
+        monitor.set_targets([{"pid": 2, "kind": "SSH", "purpose": "训练SSH · 203-1", "target": "ssh://server203"},
+            {"pid": 0, "kind": "HTTPS", "purpose": "GPU采集站", "target": "https://user:password@example.invalid/api/latest?token=secret#fragment"}])
+        result = monitor.poll()
+        ssh = next(row for row in result.entries if row.pid == 2)
+        self.assertEqual(ssh.logical_target, "ssh://server203")
+        self.assertIn("203-1", ssh.purpose)
+        self.assertEqual(next(row for row in result.entries if row.pid == 1).logical_target, "")
+        self.assertEqual(result.targets[1].target, "https://example.invalid/api/latest")
+        self.assertEqual(safe_target("https://[::1]:8443/api?key=secret"), "https://[::1]:8443/api")
+
     def test_only_current_instance_tree_is_included_not_other_python_or_ssh(self):
         processes = [process(3, 2, "ssh.exe", 12), process(1, 0), process(2, 1, born=11),
                      process(5, 0, "ssh.exe"), process(6, 5, "python.exe", 13)]

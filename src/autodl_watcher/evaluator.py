@@ -1,11 +1,11 @@
-from __future__ import annotations  # GPU 容量评估模块 — 判断物理 GPU 是否已连续满足显存条件。
+from __future__ import annotations  # 按平台空位和新鲜样本确认可用事件，不设置显存或利用率门槛。
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .config import IdleThresholds, MonitorConfig
+from .config import MonitorConfig
 from .models import AvailabilityAlert, ConfirmedGpu, GpuSample, PlatformHost
 
 
@@ -16,35 +16,19 @@ class _GpuRuntime:  # 每张 GPU 的运行时状态。
     alerted: bool = False           # 是否已告警（去重）
 
 
-def required_free_memory_mb(sample: GpuSample, thresholds: IdleThresholds) -> int:  # 计算该 GPU 需要的最低可用显存。
-    ratio_requirement = int(sample.memory_total_mb * thresholds.memory_free_min_ratio)  # 按该卡总显存计算比例门槛，随后与固定 MB 门槛取更严格者。
-    return max(thresholds.memory_free_min_mb, ratio_requirement)
+class AvailabilityEvaluator:  # 平台空位事件确认器；GPU 指标只用于展示和身份对齐。
 
-
-def sample_meets_capacity(sample: GpuSample, thresholds: IdleThresholds) -> bool:  # 判断一张 GPU 当前快照是否满足显存容量条件。
-
-    memory_ok = sample.memory_free_mb >= required_free_memory_mb(sample, thresholds)  # 显存判定使用剩余量，而不是利用率或已用显存。
-    if not memory_ok:
-        return False
-    if thresholds.gpu_util_check_enabled:  # GPU Util 只有显式开启硬门槛时才参与阻止开机。
-        return sample.util_pct <= thresholds.gpu_util_max_pct
-    return True
-
-
-class AvailabilityEvaluator:  # 容量评估器 — 结合平台 GPU ID 空位和物理 GPU 显存，判断是否可以开机。
-
-    def __init__(self, monitor: MonitorConfig, thresholds: IdleThresholds) -> None:  # 初始化当前类实例并保存后续方法需要的配置或依赖。
+    def __init__(self, monitor: MonitorConfig) -> None:
         self.monitor = monitor
-        self.thresholds = thresholds
         self._runtime: dict[tuple[str, int], _GpuRuntime] = defaultdict(  # _runtime[(host, gpu_index)] -> _GpuRuntime
             lambda: _GpuRuntime(idle_samples=deque())
         )
 
-    def _record(self, sample: GpuSample) -> None:  # 记录一条 GPU 采样到运行时状态中。
+    def _record(self, sample: GpuSample, available: bool) -> None:  # 连续性只由平台空位与样本新鲜度决定。
         key = (sample.host, sample.gpu_index)  # 以物理主机和 GPU INDEX 联合标识一张卡，不能只用入口名或索引。
         runtime = self._runtime[key]  # 首次遇到该卡时 defaultdict 自动创建空队列和未告警状态。
 
-        if sample_meets_capacity(sample, self.thresholds):
+        if available:
             if runtime.idle_samples:  # 满足条件 → 追加到空闲队列
                 gap = (sample.observed_at - runtime.idle_samples[-1].observed_at).total_seconds()
                 if gap > self.monitor.max_sample_gap_seconds:
@@ -59,14 +43,14 @@ class AvailabilityEvaluator:  # 容量评估器 — 结合平台 GPU ID 空位�
             if runtime.consecutive_busy >= self.monitor.reset_busy_samples:
                 runtime.alerted = False  # 连续忙碌足够多次 → 重置告警状态，允许再次触发
 
-    def _confirmed(self, sample: GpuSample, now: datetime) -> ConfirmedGpu | None:  # 检查一张 GPU 是否已确认连续满足容量条件。
+    def _confirmed(self, sample: GpuSample, now: datetime) -> ConfirmedGpu | None:  # 确认新鲜样本的连续观察区间。
         key = (sample.host, sample.gpu_index)  # 以物理主机和 GPU INDEX 联合标识一张卡，不能只用入口名或索引。
         runtime = self._runtime[key]  # 首次遇到该卡时 defaultdict 自动创建空队列和未告警状态。
 
         age = (now - sample.observed_at).total_seconds()  # 比较采样时间与当前本地时间，拒绝陈旧或明显来自未来的数据。
         if age < -5 or age > self.monitor.stale_after_seconds:
             return None
-        if len(runtime.idle_samples) < self.monitor.min_idle_samples:  # 即使显存达标，也必须积累足够多的连续采样。
+        if len(runtime.idle_samples) < self.monitor.min_idle_samples:  # 平台空位仍须达到配置的连续确认次数。
             return None
 
         first = runtime.idle_samples[0]
@@ -92,12 +76,22 @@ class AvailabilityEvaluator:  # 容量评估器 — 结合平台 GPU ID 空位�
         gpu_samples: list[GpuSample],
         now: datetime,
     ) -> list[AvailabilityAlert]:  # 评估当前所有 GPU 的状态，生成开机事件列表。
-        platform_by_host = {item.host: item for item in platform_hosts}  # 把平台的可分配数量索引到物理主机，供后面与显存条件交叉核对。
+        platform_by_host = {item.host: item for item in platform_hosts}  # 按物理主机核对账号可见的实时空位。
         latest_by_gpu: dict[tuple[str, int], GpuSample] = {}  # 本轮每张卡保留最后遇到的样本；并不在此按时间重新排序。
 
         for sample in gpu_samples:  # Step 1: 记录所有采样
-            self._record(sample)
+            platform = platform_by_host.get(sample.host)
+            fresh = -5 <= (now - sample.observed_at).total_seconds() <= self.monitor.stale_after_seconds
+            self._record(sample, fresh and platform is not None and platform.free_count > 0)
             latest_by_gpu[(sample.host, sample.gpu_index)] = sample
+
+        for key, runtime in self._runtime.items():
+            platform = platform_by_host.get(key[0])
+            if key not in latest_by_gpu and (platform is None or platform.free_count <= 0):
+                runtime.idle_samples.clear()  # 平台无空位时，候选过滤器可能已经移除了全部样本。
+                runtime.consecutive_busy += 1
+                if runtime.consecutive_busy >= self.monitor.reset_busy_samples:
+                    runtime.alerted = False  # 空位重新出现后可以形成新的可用事件。
 
         physical_indices_by_host: dict[str, set[int]] = defaultdict(set)  # Step 2: 统计各主机的物理 GPU INDEX 数
         for host, gpu_index in latest_by_gpu:

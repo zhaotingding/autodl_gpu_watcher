@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import re
 
-from .evaluator import AvailabilityEvaluator, sample_meets_capacity
+from .evaluator import AvailabilityEvaluator
 
 _INSTANCE_UUID = re.compile(r"[0-9a-fA-F]{10}-[0-9a-fA-F]{8}")
 _OCCUPANCY_ID_LINE = re.compile(r"([0-9a-fA-F]{10}-[0-9a-fA-F]{8})(?:[ \t]*(?:\((.*)\)|（(.*)）))?")
@@ -100,26 +100,11 @@ def _format_entry_slots(platform_host) -> str:  # 格式化各入口的 GPU ID �
     )
 
 
-def _ready_samples(samples, thresholds):  # 筛选出满足显存容量条件的 GPU 样本，按 INDEX 排序。
-    return [
-        sample
-        for sample in sorted(samples, key=lambda item: item.gpu_index)
-        if sample_meets_capacity(sample, thresholds)
-    ]
-
-
 def _fresh_gpu_indices(samples, now, stale_after_seconds):  # 只有本轮全部样本新鲜时，才允许辅助校验占用表中的额外空行。
     if not samples or any(not -5 <= (now - item.observed_at).total_seconds() <= stale_after_seconds for item in samples):
         return None
     indices = {item.gpu_index for item in samples}
     return indices if len(indices) == len(samples) else None  # 重复 INDEX 表明快照不可靠，不能据此删掉占用表的额外行。
-
-
-def _format_ready_indices(samples, thresholds) -> str:  # 格式化达标 GPU 索引，用于控制台展示，如 '#0(21728MB),#1(21736MB)'。
-    ready = _ready_samples(samples, thresholds)
-    if not ready:
-        return "无"
-    return ",".join( f"#{sample.gpu_index}({sample.memory_free_mb}MB)" for sample in ready )
 
 
 def _parse_local_iso(value: object) -> datetime | None:  # 解析 state 中的本地 ISO 时间；无效值返回 None。
@@ -150,7 +135,7 @@ def _restore_recent_evaluator_state(
     now: datetime,
     host: str,
 ) -> tuple[bool, int]:  # 恢复近期连续采样，但无条件清除跨进程 alerted 锁。
-    if persisted.get("capacity_fingerprint") != capacity_fingerprint:  # 用户、目标或阈值变了，旧连续达标记录就不能沿用。
+    if persisted.get("capacity_fingerprint") != capacity_fingerprint:  # 用户、目标或确认策略变化时不能沿用旧状态。
         return False, 0
     if not _persisted_state_is_fresh(persisted, now):
         return False, 0

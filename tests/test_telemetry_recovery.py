@@ -48,8 +48,7 @@ class TelemetryRecoveryTest(unittest.TestCase):
                  patch("autodl_watcher.main.load_config", return_value=config), \
                  patch("autodl_watcher.monitor.PlatformBrowserCollector") as platform, \
                  patch("autodl_watcher.monitor.TelemetryApiCollector") as telemetry, \
-                 patch("autodl_watcher.monitor.AutoStartCoordinator") as power, \
-                 patch("autodl_watcher.monitor._setup_logging") as logging:
+                 patch("autodl_watcher.monitor.AutoStartCoordinator") as power:
                 with self.assertRaises(SystemExit) as stopped:
                     main(["--config", str(Path(__file__).parent / "fixtures/monitor.yaml"),
                           "--host", "203", "--entry", "1", mode, "--no-login",
@@ -59,7 +58,7 @@ class TelemetryRecoveryTest(unittest.TestCase):
                 platform.assert_not_called()
                 telemetry.assert_not_called()
                 power.assert_not_called()
-                logging.assert_not_called()
+                self.assertFalse((Path(directory) / "watcher.log").exists())
 
     def collector(self):
         collector = TelemetryApiCollector(TelemetryConfig(
@@ -129,10 +128,13 @@ class TelemetryRecoveryTest(unittest.TestCase):
         collector = self.collector()
         collector._session = Mock()
         response = self.response()
-        response.json.side_effect = ValueError("invalid JSON")
+        response.json.side_effect = ValueError("invalid JSON secret-password https://gpu.invalid/?token=private-query")
         collector._session.get.return_value = response
-        with self.assertRaisesRegex(TelemetryUnavailable, "invalid JSON"):
+        with self.assertRaisesRegex(TelemetryUnavailable, "响应不是有效 JSON") as error:
             collector.collect()
+        self.assertNotIn("HTTP 200", str(error.exception))
+        self.assertNotIn("secret-password", str(error.exception))
+        self.assertNotIn("private-query", str(error.exception))
         response.close.assert_called_once()
         collector._session.get.assert_called_once()
 

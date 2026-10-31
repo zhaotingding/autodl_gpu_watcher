@@ -134,11 +134,14 @@ class GuiWindowTest(unittest.TestCase):
         self.window.process, self.window.job = process, "discover"
         self.window._session("checking", "正在核验")
         self.window._busy(True)
-        self.window._read(process)
+        with patch.object(self.window.events, "put", wraps=self.window.events.put) as emitted:
+            self.window._read(process)
+        self.assertTrue(any(call.args[0][0] == "line" and "读取失败" in call.args[0][1]
+                            for call in emitted.call_args_list))
         self.window._drain()
         self.assertIsNone(self.window.process)
         self.assertEqual(str(self.window.refresh_button["state"]), "normal")
-        self.assertIn("后台日志读取失败", self.window.log.get("1.0", "end"))
+        self.assertIn("读取失败", self.window.log.get("1.0", "end"))  # 实时错误可见，不会因为后台收尾而消失。
         self.assertEqual(self.window.session_status, "unknown")
         self.assertIn("核验未完成", self.window.session_text.get())
         process.wait.assert_called_once()
@@ -222,32 +225,44 @@ class GuiWindowTest(unittest.TestCase):
         self.assertEqual(settings["poll"], "0.5")
         self.assertFalse(self.window.live.get())
 
-    def test_two_line_report_colors_whole_group_and_has_no_statistics_controls(self):
+    def test_report_updates_status_and_realtime_output_without_usage_statistics(self):
         self.assertFalse(hasattr(self.window, "export_button"))
         self.assertFalse(hasattr(self.window, "usage_check"))
-        self.assertEqual(self.window.log.frame.winfo_manager(), "pack")
+        self.assertTrue(hasattr(self.window, "log"))
         headline = "[12:32:02] 监控203-1 | 实例状态：有卡运行 | 动作：继续监控 | 平台空闲：203-1=0/2"
         self.window.events.put(("line", gui.REPORT_PREFIX + json.dumps({"lines": [headline, "  203-1[#0:失败也是名字]"], "level": "success"})))
         self.window._drain()
         self.assertEqual(self.window.status.get(), headline)
-        self.assertEqual(self.window.log.get("1.0", "end").count(headline), 1)
-        self.assertIn("success", self.window.log.tag_names("1.0"))
-        self.assertIn("success", self.window.log.tag_names("2.0"))
         self.assertEqual(str(self.window.status_label.cget("foreground")), "#18733a")
+        output = self.window.log.get("1.0", "end")
+        self.assertIn(headline, output)
+        self.assertIn("203-1[#0:失败也是名字]", output)
+        self.assertEqual(self.window.log.tag_names("2.3"), ("success",))
+        self.assertNotIn(gui.REPORT_PREFIX, output)  # 内部JSON协议不作为界面输出。
         self.assertFalse(hasattr(self.window, "usage"))
         self.assertEqual(len(self.window.settings_window.inputs), 2)
         self.assertTrue(self.window.save())
         settings = yaml.safe_load((self.folder / ".ui/preferences.yaml").read_text(encoding="utf-8"))
         self.assertNotIn("usage", settings)
 
-    def test_report_error_and_normal_levels_cover_both_lines(self):
+    def test_report_levels_apply_to_status_and_realtime_group(self):
         for level in ("error", "normal"):
             self.window.events.put(("line", gui.REPORT_PREFIX + json.dumps({"lines": [
                 "[12:32:02] 监控203-1 | 实例状态：无卡运行 | 动作：等待", "  203-1[#0:成功]"], "level": level})))
-        self.window._drain()
-        for row, level in ((1, "error"), (2, "error"), (3, "normal"), (4, "normal")):
-            self.assertIn(level, self.window.log.tag_names(f"{row}.0"))
-        self.assertEqual(self.window.log.cget("wrap"), "none")
+            self.window._drain()
+            self.assertEqual(str(self.window.status_label.cget("foreground")),
+                             "#b42318" if level == "error" else "#245cc4")
+            self.assertNotIn("#0:成功", self.window.status.get())  # 当前状态不重复展开占用详情。
+        self.assertEqual(self.window.log.tag_names("1.0"), ("error",))
+        self.assertEqual(self.window.log.tag_names("3.0"), ("normal",))
+
+    def test_realtime_output_is_bounded_and_does_not_write_monitor_history(self):
+        self.window._append_output("\n".join(f"实时采样 {index}" for index in range(2050)))
+        output = self.window.log.get("1.0", "end-1c").splitlines()
+        self.assertEqual(len(output), 2000)
+        self.assertEqual((output[0], output[-1]), ("实时采样 50", "实时采样 2049"))
+        self.assertEqual(self.window.log.cget("state"), "disabled")
+        self.assertFalse(list(self.folder.rglob("watcher.log")))
 
     def test_default_interval_and_legacy_preferences_migrate_once(self):
         self.assertEqual(float(self.window.poll.get()), 60)
@@ -264,50 +279,217 @@ class GuiWindowTest(unittest.TestCase):
             self.assertTrue(self.window.save())
         self.assertNotIn("usage", yaml.safe_load(preferences.read_text(encoding="utf-8")))
 
-    def test_gpu_bars_use_physical_host_and_mark_stale_or_missing_data(self):
+    def test_resource_table_updates_all_visible_servers_with_one_row_per_gpu(self):
         from datetime import datetime, timedelta
-        def descendants(widget):
-            return [child for item in widget.winfo_children() for child in [item, *descendants(item)]]
+        entries = ("autodl-201-1", "autodl-201-2", "autodl-202-2", "autodl-202-4", "autodl-203-1", "autodl-203-2")
+        self.window._populate([(entry, "0/4" if "201" in entry else "0/2", None) for entry in entries])
         samples = [{"host": host, "gpu_index": index, "gpu_name": "测试GPU", "util_pct": 30 + index,
                     "memory_used_mb": 16000, "memory_total_mb": 32000, "observed_at": datetime.now().isoformat()}
                    for host, count in (("gpu-203", 2), ("gpu-201", 4)) for index in range(count)]
-        self.window.gpu_snapshot = {"samples": samples, "stale_after_seconds": 90}
-        for entry, count in (("autodl-203-1", 2), ("autodl-203-2", 2), ("autodl-201-1", 4)):
-            self.window.table.selection_set(entry)
-            self.window._render_gpus()
-            bars = [item for item in descendants(self.window.gpu_panel) if isinstance(item, gui.ttk.Progressbar)]
-            self.assertEqual(len(bars), count * 2)
-            self.assertEqual([float(item["value"]) for item in bars], [v for i in range(count) for v in (30 + i, 50)])
-            self.assertEqual(self.window.selected_entry(), entry)
-        self.root.deiconify()
-        self.root.update()
-        import tkinter.font as tkfont
-        font = tkfont.Font(self.root, font=self.window.log.cget("font"))
-        self.assertGreaterEqual(self.window.log.winfo_height() - 2 * int(self.window.log.cget("pady")) - 8, 6 * font.metrics("linespace"))
+        self.window._accept_gpu_snapshot({"samples": samples, "stale_after_seconds": 90})
+        self.window._render_resources()
+        self.assertEqual(self.window.table.get_children(), entries)
+        for entry, count in (("autodl-203-1", 2), ("autodl-203-2", 2), ("autodl-201-1", 4), ("autodl-201-2", 4)):
+            children = self.window.table.get_children(entry)
+            self.assertEqual(children, tuple(gui.gpu_row_id(entry, index) for index in range(count)))
+            self.assertEqual(self.window.table.set(entry, "memory"), "")
+            self.assertEqual(self.window.table.set(entry, "util"), "")  # 父行不再拼接全部GPU长串。
+            self.assertTrue(self.root.tk.getboolean(self.window.table.item(entry, "open")))
+            for index, child in enumerate(children):
+                self.assertEqual(self.window.table.item(child, "text"), f"GPU #{index}")
+                self.assertIn("50%", self.window.table.set(child, "memory"))
+                self.assertEqual(self.window.table.set(child, "util").count("%"), 1)
+                self.assertRegex(self.window.table.set(child, "capacity"), r"^\d+\.\d / \d+\.\d$")
+                self.assertIn("物理机", self.window.table.set(child, "state"))
+        self.assertIn("GiB", self.window.table.heading("capacity", "text"))
+        first = gui.gpu_row_id("autodl-203-1", 0)
+        second = gui.gpu_row_id("autodl-203-2", 0)
+        self.assertEqual(self.window.table.set(first, "memory"), self.window.table.set(second, "memory"))
+        self.assertNotIn("model", self.window.table.cget("columns"))
+        self.assertFalse(hasattr(self.window, "gpu_panel"))
         for sample in samples:
             sample["observed_at"] = (datetime.now() - timedelta(seconds=91)).isoformat()
-        self.window._render_gpus()
-        self.assertFalse(any(isinstance(item, gui.ttk.Progressbar) for item in descendants(self.window.gpu_panel)))
-        self.assertIn("数据已过期", [item.cget("text") for item in descendants(self.window.gpu_panel) if isinstance(item, gui.ttk.Label)])
-        self.window.gpu_snapshot = {"samples": [], "error": "采集失败"}
-        self.window._render_gpus()
-        self.assertEqual(self.window.gpu_panel.winfo_children()[0].cget("text"), "采集失败")
+        self.window._accept_gpu_snapshot({"samples": samples, "stale_after_seconds": 90})
+        self.window._render_resources()
+        self.assertIn("50%", self.window.table.set(first, "memory"))  # 延迟样本仍保留最后实测值，不整格替换成“已过期”。
+        self.assertIn("%", self.window.table.set(gui.gpu_row_id("autodl-201-1", 0), "util"))
+        self.window._accept_gpu_snapshot({"samples": [], "error": "采集失败"})
+        self.window._render_resources()
+        self.assertIn("50%", self.window.table.set(first, "memory"))
+        self.assertIn("失败", self.window.table.set(first, "state"))
 
-    def test_initial_layout_has_room_for_three_complete_two_line_cycles(self):
-        import tkinter.font as tkfont
+    def test_entry_resource_samples_take_priority_over_physical_host_fallback(self):
+        from datetime import datetime
+        self.window._populate([("autodl-203-1", "0/2", None), ("autodl-203-2", "0/2", None)])
+        stamp = datetime.now().isoformat()
+        self.window._accept_gpu_snapshot({"samples": [
+            {"host": "gpu-203", "gpu_index": index, "gpu_name": "物理GPU", "util_pct": 30,
+             "memory_used_mb": 16384, "memory_total_mb": 32768, "observed_at": stamp} for index in range(2)] + [
+            {"host": "autodl-203-1", "gpu_index": 0, "gpu_name": "入口GPU", "util_pct": 93,
+             "memory_used_mb": 8192, "memory_total_mb": 32768, "observed_at": stamp}]})
+        self.window._render_resources()
+        exact = gui.gpu_row_id("autodl-203-1", 0)
+        self.assertIn("25%", self.window.table.set(exact, "memory"))
+        self.assertIn("93%", self.window.table.set(exact, "util"))
+        self.assertIn("入口", self.window.table.set(exact, "state"))
+        self.assertEqual(self.window.table.get_children("autodl-203-1"), (exact,))
+        self.assertFalse(self.window.table.exists(gui.gpu_row_id("autodl-203-1", 1)))
+        for child in self.window.table.get_children("autodl-203-2"):
+            self.assertIn("50%", self.window.table.set(child, "memory"))
+            self.assertIn("物理机", self.window.table.set(child, "state"))
+
+    def test_invalid_resource_values_do_not_display_zero_or_break_other_rows(self):
+        from datetime import datetime
+        self.window._populate([("autodl-203-1", "0/2", None), ("autodl-201-1", "0/4", None)])
+        stamp = datetime.now().isoformat()
+        self.window._accept_gpu_snapshot({"samples": [
+            {"host": "autodl-203-1", "gpu_index": 0, "gpu_name": "坏样本", "util_pct": float("nan"),
+             "memory_used_mb": 0, "memory_total_mb": 32768, "observed_at": stamp},
+            {"host": "autodl-201-1", "gpu_index": 0, "gpu_name": "有效样本", "util_pct": 80,
+             "memory_used_mb": 8192, "memory_total_mb": 32768, "observed_at": stamp}]})
+        self.window._render_resources()
+        invalid = gui.gpu_row_id("autodl-203-1", 0)
+        valid = gui.gpu_row_id("autodl-201-1", 0)
+        self.assertNotIn("%", self.window.table.set(invalid, "util"))
+        self.assertNotIn("nan", self.window.table.set(invalid, "util").lower())
+        self.assertIn("80%", self.window.table.set(valid, "util"))
+
+    def test_selecting_gpu_uses_parent_entry_for_commands_and_saved_preferences(self):
+        from datetime import datetime
+        entry = "autodl-203-1"
+        self.window._populate([(entry, "0/2", "可开机")])
+        self.window._accept_gpu_snapshot({"samples": [dict(host=entry, gpu_index=1, util_pct=60,
+            memory_used_mb=8192, memory_total_mb=32768, observed_at=datetime.now().isoformat())]})
+        self.window._render_resources()
+        child = gui.gpu_row_id(entry, 1)
+        self.window.table.selection_set(child)
+        self.assertEqual(self.window.selected_entry(), entry)
+        command = self.window._command()
+        self.assertEqual(command[command.index("--entry") + 1], entry)
+        self.assertTrue(self.window.save())
+        saved = yaml.safe_load((self.folder / ".ui/preferences.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(saved["entry"], entry)  # 不能把GPU行ID写成下次启动的服务器入口。
+
+    def test_resource_refresh_preserves_selected_gpu_and_parent_expansion(self):
+        from datetime import datetime
+        rows = [("autodl-201-1", "0/4", None), ("autodl-203-1", "0/2", None)]
+        self.window._populate(rows)
+        self.window._accept_gpu_snapshot({"samples": [dict(host=entry, gpu_index=index, util_pct=20,
+            memory_used_mb=8192, memory_total_mb=32768, observed_at=datetime.now().isoformat())
+            for entry, _, _ in rows for index in range(2)]})
+        self.window._render_resources()
+        child = gui.gpu_row_id("autodl-203-1", 1)
+        self.window.table.item("autodl-201-1", open=False)
+        self.window.table.selection_set(child)
+        self.window._populate(list(reversed(rows)))
+        self.assertEqual(self.window.table.selection(), (child,))
+        self.assertFalse(self.root.tk.getboolean(self.window.table.item("autodl-201-1", "open")))
+        self.assertTrue(self.root.tk.getboolean(self.window.table.item("autodl-203-1", "open")))
+        self.assertEqual(self.window.selected_entry(), "autodl-203-1")
+
+    def test_removed_gpu_selection_falls_back_to_its_server(self):
+        from datetime import datetime
+        entry = "autodl-203-1"
+        self.window._populate([(entry, "0/2", None)])
+        samples = [dict(host=entry, gpu_index=index, util_pct=20, memory_used_mb=8192,
+                        memory_total_mb=32768, observed_at=datetime.now().isoformat()) for index in range(2)]
+        self.window._accept_gpu_snapshot({"samples": samples})
+        self.window._render_resources()
+        child = gui.gpu_row_id(entry, 1)
+        self.window.table.selection_set(child)
+        self.window._accept_gpu_snapshot({"samples": samples[:1]})
+        self.window._render_resources()
+        self.assertFalse(self.window.table.exists(child))
+        self.assertEqual(self.window.table.selection(), (entry,))
+        self.assertEqual(self.window.selected_entry(), entry)
+
+    def test_failed_snapshot_message_keeps_last_gpu_values_with_failure_status(self):
+        from datetime import datetime
+        entry = "autodl-203-1"
+        self.window._populate([(entry, "0/2", None)])
+        self.window._accept_gpu_snapshot({"samples": [dict(host=entry, gpu_index=0, util_pct=73,
+            memory_used_mb=16384, memory_total_mb=32768, observed_at=datetime.now().isoformat())]})
+        self.window._render_resources()
+        child = gui.gpu_row_id(entry, 0)
+        before = {column: self.window.table.set(child, column) for column in ("memory", "util", "capacity", "observed")}
+        self.window.events.put(("line", gui.GPU_PREFIX + json.dumps({"samples": [], "error": "HTTP采集失败"})))
+        self.window._drain()
+        self.assertEqual({column: self.window.table.set(child, column) for column in before}, before)
+        self.assertIn("失败", self.window.table.set(child, "state"))
+
+    def test_four_gpus_have_independent_short_cells_with_complete_percentages(self):
+        from datetime import datetime
+        entry = "autodl-201-1"
+        self.window._populate([(entry, "0/4", None)])
+        self.window._accept_gpu_snapshot({"samples": [dict(host=entry, gpu_index=index, util_pct=percent,
+            memory_used_mb=32768 * percent / 100, memory_total_mb=32768,
+            observed_at=datetime.now().isoformat()) for index, percent in enumerate((0, 25, 50, 100))]})
+        self.window._render_resources()
+        children = self.window.table.get_children(entry)
+        self.assertEqual(len(children), 4)
+        for child, percent in zip(children, (0, 25, 50, 100)):
+            self.assertEqual(self.window.table.set(child, "memory").count("%"), 1)
+            self.assertEqual(self.window.table.set(child, "util").count("%"), 1)
+            self.assertIn(f"{percent}%", self.window.table.set(child, "memory"))
+            self.assertIn(f"{percent}%", self.window.table.set(child, "util"))
+            self.assertRegex(self.window.table.set(child, "capacity"), r"^\d+\.\d / \d+\.\d$")
+        self.assertIn("GiB", self.window.table.heading("capacity", "text"))  # 单位在列头，数值列不重复堆叠文字。
+
+    def test_resource_refresh_preserves_scroll_position(self):
+        from datetime import datetime
+        rows = [(f"autodl-500-{index}", "0/2", None) for index in range(1, 26)]
+        self.window._populate(rows)
+        self.window._accept_gpu_snapshot({"samples": [dict(host=entry, gpu_index=0, util_pct=20,
+            memory_used_mb=8192, memory_total_mb=32768, observed_at=datetime.now().isoformat())
+            for entry, _, _ in rows]})
         self.root.deiconify()
         self.root.update()
-        font = tkfont.Font(self.root, font=self.window.log.cget("font"))
-        available = self.window.log.winfo_height() - 2 * int(self.window.log.cget("pady")) - 8
-        self.assertGreaterEqual(available, 6 * font.metrics("linespace"))
+        self.window.table.yview_moveto(.5)
+        self.root.update()
+        before = self.window.table.yview()[0]
+        self.assertGreater(before, .1)
+        self.window._populate(rows)
+        self.root.update()
+        self.assertAlmostEqual(self.window.table.yview()[0], before, delta=.04)
+
+    def test_percent_and_capacity_text_fit_their_columns_at_minimum_window_size(self):
+        from datetime import datetime
+        from tkinter import font as tkfont
+        entry = "autodl-201-1"
+        self.window._populate([(entry, "0/4", None)])
+        self.window._accept_gpu_snapshot({"samples": [dict(host=entry, gpu_index=index, util_pct=percent,
+            memory_used_mb=49152 * percent / 100, memory_total_mb=49152,
+            observed_at=datetime.now().isoformat()) for index, percent in enumerate((0, 25, 50, 100))]})
+        self.root.geometry("820x660")
+        self.root.deiconify()
+        self.root.update()
+        table = self.window.table
+        style_name = table.cget("style") or "Treeview"
+        for child in table.get_children(entry):
+            tag = table.item(child, "tags")[0]
+            font = tkfont.Font(root=self.root, font=table.tag_configure(tag, "font")
+                               or gui.ttk.Style(self.root).lookup(style_name, "font"))
+            for column in ("memory", "util", "capacity"):
+                self.assertLessEqual(font.measure(table.set(child, column)) + 12, table.column(column, "width"),
+                                     f"{column}的实测文字宽度超过列宽，会造成截断")
+
+    def test_initial_layout_shows_resource_table_and_realtime_output(self):
+        self.root.deiconify()
+        self.root.update()
         self.assertEqual((self.root.winfo_width(), self.root.winfo_height()), (1000, 800))
-        self.assertLess(self.window.table.winfo_width(), 350)
-        self.assertLess(self.window.table.winfo_height(), 170)
+        self.assertGreater(self.window.table.winfo_width(), 800)
+        self.assertGreater(self.window.table.winfo_height(), 175)
+        self.assertGreaterEqual(self.window.log.winfo_height(), 100)
+        self.assertGreater(self.window.log.winfo_rooty(), self.window.table.winfo_rooty())
+        self.assertEqual(self.window.table.cget("columns"), ("slots", "memory", "util", "capacity", "observed", "state"))
+        self.assertEqual(tuple(str(part) for part in self.window.table.cget("show")), ("tree", "headings"))
+        for removed in ("gpu_panel", "training_pane"):
+            self.assertFalse(hasattr(self.window, removed))
 
     def test_normal_mode_defaults_to_monitor_only_and_debug_stays_readonly(self):
         self.assertFalse(self.window.live.get())
         self.assertFalse(self.window.convert_no_gpu.get())
-        self.window.table.set(self.window.selected_entry(), "target", "可开机")
+        self.window.power_eligibility[self.window.selected_entry()] = "可开机"
         self.assertIn("--monitor-only", self.window._command())
         self.window.settings_window.live_check.invoke()
         self.assertTrue(self.window.live.get())
@@ -321,7 +503,7 @@ class GuiWindowTest(unittest.TestCase):
     def test_saved_power_options_and_interval_survive_restart(self):
         for live, convert in ((False, False), (True, False), (True, True)):
             with self.subTest(live=live, convert=convert):
-                self.window.table.set(self.window.selected_entry(), "target", "可开机")
+                self.window.power_eligibility[self.window.selected_entry()] = "可开机"
                 self.window.live.set(live)
                 self.window.convert_no_gpu.set(convert)
                 self.window.poll.set("120")
@@ -345,7 +527,7 @@ class GuiWindowTest(unittest.TestCase):
         self.assertFalse(self.window.convert_no_gpu.get())
         self.assertIn("--monitor-only", self.window._command())
 
-    def test_checked_indicator_is_tick_and_output_has_event_colors(self):
+    def test_checked_indicator_is_tick_and_errors_use_current_status(self):
         self.assertEqual(self.window.settings_window.live_check["style"], "Watcher.TCheckbutton")
         style = gui.ttk.Style(self.root)
         self.assertIn("Watcher.indicator", style.element_names())
@@ -358,12 +540,9 @@ class GuiWindowTest(unittest.TestCase):
         self.window.events.put(("line", "本人 GPU 占用 有（本轮弹窗）\n"))
         self.window.events.put(("line", "连接断开，采集失败\n"))
         self.window._drain()
-        self.assertNotIn("error", self.window.log.tag_names("1.0"))
-        self.assertIn("success", self.window.log.tag_names("2.0"))
-        self.assertIn("error", self.window.log.tag_names("3.0"))
-        self.assertEqual(self.window.log.tag_cget("success", "foreground"), "#79e69d")
-        self.assertEqual(self.window.log.tag_cget("error", "foreground"), "#ff8181")
-        self.assertEqual(self.window.log.cget("foreground"), "#e2e8f0")
+        self.assertEqual(self.window.status.get(), "连接断开，采集失败")
+        self.assertEqual(str(self.window.status_label.cget("foreground")), "#b42318")
+        self.assertIn("连接断开，采集失败", self.window.log.get("1.0", "end"))
 
     def test_background_output_stop_and_restart(self):
         code = ("import pathlib,sys,time; p=pathlib.Path(sys.argv[1]); "
