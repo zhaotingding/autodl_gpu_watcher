@@ -12,6 +12,7 @@ import requests
 from ..config import TelemetryConfig, validate_telemetry_endpoint
 from ..models import GpuSample, PlatformHost
 from ..telemetry_auth import TelemetryAuthError, origin, request_auth
+from ..network_activity import attach_requests
 
 
 def _parse_received_at(value: str) -> datetime:  # 解析 Telemetry API 返回的时间戳字符串。
@@ -76,6 +77,7 @@ class TelemetryApiCollector:  # Telemetry API 采集器 — 通过 HTTP GET 拉�
         self._site_auth = None
         self._form_authenticated = False  # 只复用此Session的内存Cookie，不写个人浏览器或磁盘。
         self._session = requests.Session()  # 复用 HTTP 连接；默认仍遵循此进程的代理环境。
+        attach_requests(self._session, "GPU采集站")  # 登录与采样复用原Session，记录请求实际端点且不读取凭据。
         self._session.headers.update(
             {
                 "Accept": "application/json",

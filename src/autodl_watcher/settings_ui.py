@@ -139,17 +139,31 @@ class GlobalSettings(tk.Toplevel):
             values[key] = tk.StringVar(value=str(getattr(server, key)))  # 仅编辑本次表单，不直接改活动服务配置。
             ttk.Entry(form, textvariable=values[key], width=42).grid(row=row, column=1, sticky="ew", pady=4)
         pinned = tk.BooleanVar(value=server.pinned)
-        ttk.Checkbutton(form, text="固定到顶部标签", variable=pinned, style="Watcher.TCheckbutton").grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Label(form, text="固定后重开仍显示；未固定也可临时打开训练页。收起页面不停止监控。\n使用已有SSH密钥和已核验主机；首次连接先确认SSH可用。\n连接修改下次启动监控生效，固定选项保存后立即生效。", wraplength=570).grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
+        pin_check = ttk.Checkbutton(form, text="固定到顶部标签（点击即保存）", variable=pinned, style="Watcher.TCheckbutton")
+        pin_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Label(form, text="已有服务器的固定选项点击立即保存；新服务器先保存连接。\n固定、收起不停止监控；SSH连接修改仍需点击“保存连接”，下次启动生效。\n使用已有SSH密钥和已核验主机；首次连接先确认SSH可用。", wraplength=570).grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
         reason = ttk.Label(form, foreground="#b42318", wraplength=570)
         reason.grid(row=8, column=0, columnspan=2, sticky="w")
+        def pin_changed():
+            current = next((item for item in self.app.servers if item.id == server.id), None)
+            if current is None:
+                reason.configure(text="固定选项已选择；请先保存新服务器连接。", foreground="#8a5b11")
+                return
+            try:
+                self.app.save_server(replace(current, pinned=pinned.get()))  # 只保存已保存配置的固定字段，不提交尚未保存的SSH文本。
+            except (ValueError, OSError) as exc:
+                pinned.set(current.pinned)  # 写入失败恢复勾选状态，避免界面与持久配置不一致。
+                reason.configure(text="固定设置保存失败：" + str(exc), foreground="#b42318")
+                return
+            message = "已固定到顶部标签。" if pinned.get() else "已取消固定；正在运行的监控继续。"
+            reason.configure(text=message, foreground="#245c45")
+        pin_check.configure(command=pin_changed)
         def apply():  # 表单负责输入转换，应用统一协调保存、服务注册与页面刷新。
             try:
                 updated = replace(server, **{key: value.get().strip() for key, value in values.items() if key != "stalled_minutes"},
                                   stalled_minutes=float(values["stalled_minutes"].get()), pinned=pinned.get()).validate()
                 self.app.save_server(updated)  # 成功写入后才更新运行服务的待生效配置。
-                reason.configure(text="已保存；固定选项立即生效，监控中的连接修改下次启动生效。", foreground="#245c45")
+                reason.configure(text="连接已保存；固定选项已生效，监控中的连接修改下次启动生效。", foreground="#245c45")
             except (ValueError, OSError) as exc:
                 reason.configure(text=str(exc), foreground="#b42318")  # 校验或写入失败留在当前表单供修改。
         actions = ttk.Frame(form)

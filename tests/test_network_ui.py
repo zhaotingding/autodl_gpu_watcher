@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 from autodl_watcher.network_ui import NetworkPanel, duration, endpoint
+from autodl_watcher.network_attribution import parse_observation
 
 
 def record(identifier="ssh-1", **changes):
@@ -74,6 +75,40 @@ class NetworkPanelTest(unittest.TestCase):
         self.assertIn("首次观察", text)
         self.assertIn("不证明业务已经结束", text)
         self.assertEqual(monitor.poll.call_count, 1)  # 筛选及切页不触发额外采样。
+
+    def test_application_url_evidence_and_socket_categories_are_visible(self):
+        observed = parse_observation(dict(pid=121, observed_at=1700000159,
+            url="https://gpu.example.invalid/api/latest?token=secret", purpose="GPU采集站", evidence="requests"))
+        rows = snapshot(record(application_protocol="HTTPS", purpose="GPU采集站",
+            request_urls=(observed.url,), attribution="已匹配：请求PID及TCP源/目标IP和端口", request_observed_at=1700000159,
+            network_hint="含198.18/15保留地址，可能为TUN/Fake-IP；实际路由待核对"),
+            record("candidate", application_protocol="HTTPS", request_urls=(observed.url,),
+                attribution="候选：进程请求记录，未核对端点"),
+            record("loop-1", remote_address="127.0.0.1", remote_port=56562, application_protocol="本机内部通信"),
+            record("loop-2", remote_address="127.0.0.1", remote_port=56561, application_protocol="本机内部通信"),
+            record("listener", state="LISTEN", remote_address="", remote_port=0),
+            record("udp", protocol="UDP", remote_address="", remote_port=0))
+        rows.observations = (observed,)
+        panel = self.panel(Mock(poll=Mock(return_value=rows)))
+        self.pump(lambda: panel._snapshot is not None)
+        self.assertEqual(panel.table.set("ssh-1", "protocol"), "TCP4 / HTTPS")
+        self.assertEqual(panel.table.set("ssh-1", "service"), "https://gpu.example.invalid/api/latest")
+        self.assertIn("源/目标IP和端口", panel.table.set("ssh-1", "attribution"))
+        self.assertEqual(panel.table.set("candidate", "protocol"), "TCP4 / HTTPS（候选）")
+        self.assertIn("回环TCP 2", panel.summary.get())
+        self.assertIn("远端TCP 2", panel.summary.get())
+        self.assertIn("监听 1", panel.summary.get())
+        self.assertIn("UDP 1", panel.summary.get())
+        self.assertTrue(any("已观测请求" in panel.target_table.set(item, "evidence")
+                            for item in panel.target_table.get_children()))
+        panel.table.selection_set("ssh-1")
+        panel._render_detail()
+        text = panel.detail.get("1.0", "end")
+        self.assertIn("上层：HTTPS", text)
+        self.assertIn("归因依据", text)
+        self.assertIn("198.18/15", text)
+        self.assertNotIn("secret", text)
+        self.assertNotIn("?token", text)
 
     def test_partial_failure_shows_unknown_and_preserves_old_record(self):
         monitor = Mock()

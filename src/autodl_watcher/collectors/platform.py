@@ -14,6 +14,7 @@ from playwright.sync_api import BrowserContext, Error as PlaywrightError, Page, 
 from ..config import PlatformConfig
 from ..login import prepare_profile_for_exclusive_use
 from ..models import OccupancyRecord, PlatformHost
+from ..network_activity import observe_playwright
 
 
 _MACHINE_PATTERN = re.compile(r"^autodl-(\d+)-\d+$", re.IGNORECASE)  # 匹配 autodl-202-2 → 提取 202（物理主机号）
@@ -219,6 +220,8 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
             self._context = context
             self._page = context.pages[0] if context.pages else context.new_page()
             context.on("request", self._capture_platform_request)  # v0.5.2：请求一发出就捕获 Authorization 与 machine/list 请求体。 即使页面响应很慢、expect_response 超时，后续也能直接走 API 重试， 不必每 10 秒整页 reload，更不会仅凭超时就误判“登录失效”。
+            browser_name = ("chrome" if self.config.browser_channel == "chrome" else "msedge") + (".exe" if os.name == "nt" else "")
+            context.on("response", lambda response: observe_playwright(response, browser_process_name=browser_name))  # 按实际浏览器收窄候选，不新增请求。
         except Exception:
             if context is not None:
                 try:
@@ -396,6 +399,7 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
             timeout=self.config.response_timeout_seconds * 1000,
         )
         try:
+            observe_playwright(response, context=self._context)  # Node请求保留实际网址及可获得的对端，缺本地端口时仅作候选。
             yield response
         finally:
             response.dispose()  # APIResponse 不随 Python 引用回收；每轮保留会占用 context 的响应体存储。

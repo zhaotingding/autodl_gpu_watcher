@@ -9,6 +9,7 @@ from .cli import positive_seconds
 from .config import load_config
 from .monitor import _enable_ansi_colors, run_monitor
 from .paths import default_config_path, prepare_application
+from .network_activity import emit_observation, set_observer
 
 def _build_parser(default_host: str) -> argparse.ArgumentParser:  # 构建 CLI 参数解析器。
     parser = argparse.ArgumentParser( description="监控指定物理服务器，并按实时入口空位自动启动对应固定实例。" )
@@ -62,7 +63,12 @@ def main(argv=None) -> None:  # 主入口：初始化各组件后进入无限监
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(str(exc))
 
-    run_monitor(config, args, config_path, parser)  # 所有启动方式最终复用这一条监控业务链。
+    previous = set_observer(emit_observation) if args.ui else None  # GUI子进程用独立协议传递请求证据。
+    try:
+        run_monitor(config, args, config_path, parser)  # 所有启动方式最终复用这一条监控业务链。
+    finally:
+        if args.ui:
+            set_observer(previous)
 
 
 if __name__ == "__main__":

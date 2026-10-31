@@ -14,6 +14,7 @@ from .training_events import ANSI_ESCAPE, dictionary  # 日志清理与字典解
 from .training_rules import EmptyRulesError, local_profile, validate_profile
 from .training_ai_usage import pricing_settings, tokens, estimate
 from .yaml_settings import read_settings, settings_source, write_settings
+from .network_activity import attach_requests
 
 DEFAULTS = {"base_url": "https://api.openai.com/v1", "protocol": "responses", "model": "", "service_tier": "flex"}
 DEFAULT_LOG_CHARS = 200000  # 手动输入预算可配置；超出时拒绝发送，不静默截掉训练阶段。
@@ -256,6 +257,7 @@ def analyze(config, source, pid=None, *, control=None):
     note = ""
     try:
         with requests.Session() as session:
+            attach_requests(session, "AI规则生成")  # 仅观察已获授权的这次请求，不触发额外收费调用。
             with session.post(config["base_url"] + route, json=payload, headers={"Authorization": "Bearer " + key},
                               timeout=(10, seconds), stream=True, allow_redirects=False) as response:
                 if control:

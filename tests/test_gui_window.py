@@ -58,6 +58,20 @@ class GuiWindowTest(unittest.TestCase):
         self.assertEqual(len([c for c in self.root.winfo_children() if isinstance(c, tk.Toplevel)]), 1)
         self.assertIn("Auto算力与训练调度", self.root.title())
 
+    def test_worker_request_evidence_reaches_memory_without_blackbox_protocol_noise_or_poll(self):
+        from autodl_watcher.network_activity import NETWORK_PREFIX
+        self.assertIsNone(self.window.network_monitor)
+        self.window.events.put(("line", NETWORK_PREFIX + json.dumps({"pid": 1, "observed_at": time.time(),
+            "url": "https://user:secret@sample.invalid/api?token=secret", "purpose": "GPU采集站",
+            "evidence": "process-request"})))
+        self.window._drain()
+        observations = tuple(self.window.network_monitor._incoming)
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].url, "https://sample.invalid/api")
+        self.assertFalse(self.window.network_monitor._current)  # 接收观察事件不触发系统轮询。
+        self.assertNotIn(NETWORK_PREFIX, self.window.log.get("1.0", "end"))
+        self.assertNotIn("secret", self.window.log.get("1.0", "end"))
+
     def test_network_button_opens_global_single_panel_without_starting_business(self):
         from autodl_watcher.network_monitor import NetworkSnapshot
         self.assertEqual(self.window.network_button.cget("text"), "网络连接详情")
@@ -485,6 +499,32 @@ class GuiWindowTest(unittest.TestCase):
         self.assertEqual(tuple(str(part) for part in self.window.table.cget("show")), ("tree", "headings"))
         for removed in ("gpu_panel", "training_pane"):
             self.assertFalse(hasattr(self.window, removed))
+
+    def test_gpu_monitor_controls_are_explicit_and_stay_above_resource_rows(self):
+        self.root.geometry("820x660")
+        self.root.deiconify()
+        self.root.update()
+        self.assertEqual(self.window.start_button.cget("text"), "开始GPU监控")
+        self.assertEqual(self.window.stop_button.cget("text"), "停止GPU监控")
+        self.assertLess(self.window.stop_button.winfo_rooty(), self.window.table.winfo_rooty())
+        self.window.job = "monitor"
+        self.window._busy(True)
+        self.assertEqual(str(self.window.stop_button.cget("state")), "normal")
+        self.window._busy(False)
+        self.assertEqual(str(self.window.stop_button.cget("state")), "disabled")
+
+    def test_realtime_output_default_height_shows_three_complete_rounds(self):
+        from tkinter import font as tkfont
+        self.assertGreaterEqual(int(self.window.log.cget("height")), 9)
+        font = tkfont.Font(root=self.root, font=self.window.log.cget("font"))
+        for geometry in ("1000x800", "820x660"):
+            with self.subTest(geometry=geometry):
+                self.root.geometry(geometry)
+                self.root.deiconify()
+                self.root.update()
+                text_height = (self.window.log.winfo_height() - 2 * int(self.window.log.cget("pady"))
+                               - 2 * int(self.window.log.cget("borderwidth")))
+                self.assertGreaterEqual(text_height, font.metrics("linespace") * 6)
 
     def test_normal_mode_defaults_to_monitor_only_and_debug_stays_readonly(self):
         self.assertFalse(self.window.live.get())

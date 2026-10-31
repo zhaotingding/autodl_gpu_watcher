@@ -7,6 +7,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
+from .network_attribution import is_loopback
+
 
 STATE_LABELS = {  # TCP 状态取自系统，不把握手完成解释为 SSH 已认证。
     "ESTABLISHED": "已建立（TCP）", "SYN_SENT": "正在连接", "SYN_RECEIVED": "等待握手", "SYN_RCVD": "等待握手",
@@ -47,7 +49,7 @@ def state_label(record, stale=False):
 class NetworkPanel(tk.Toplevel):
     REFRESH_MS = 3000  # 只在面板打开时进行本机快照采样，不影响业务采集间隔。
     DRAIN_MS = 80
-    COLUMNS = ("purpose", "protocol", "state", "process", "source", "target", "first_seen", "duration")
+    COLUMNS = ("purpose", "protocol", "service", "state", "process", "source", "target", "attribution", "first_seen", "duration")
 
     def __init__(self, master, monitor, targets_provider=None):
         super().__init__(master)
@@ -68,8 +70,8 @@ class NetworkPanel(tk.Toplevel):
         self.summary = tk.StringVar(self, value="正在读取本机连接快照…")
         self.status = tk.StringVar(self, value="")
         self.title("网络连接详情 · Auto算力与训练调度")
-        self.geometry("1200x700")
-        self.minsize(960, 550)
+        self.geometry("1420x760")
+        self.minsize(1000, 600)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         self.filter_text.trace_add("write", lambda *_: self._render())
@@ -94,10 +96,11 @@ class NetworkPanel(tk.Toplevel):
                             command=self._render).pack(side="left", padx=(0, 10))
         ttk.Label(controls, text="筛选：").pack(side="left", padx=(10, 0))
         ttk.Entry(controls, textvariable=self.filter_text).pack(side="left", fill="x", expand=True)
-        services = ttk.LabelFrame(body, text="服务网址 / SSH目标（来自应用配置，不是TCP反查结果）", padding=4)
+        services = ttk.LabelFrame(body, text="服务网址与请求观测（逐连接对应关系见下表）", padding=4)
         services.pack(fill="x", pady=(0, 6))
-        self.target_table = ttk.Treeview(services, columns=("purpose", "kind", "address"), show="headings", height=4)
-        for key, label, width in (("purpose", "用途 / 服务器", 230), ("kind", "协议", 80), ("address", "具体网址 / SSH别名", 720)):
+        self.target_table = ttk.Treeview(services, columns=("purpose", "kind", "address", "evidence"), show="headings", height=4)
+        for key, label, width in (("purpose", "调用用途 / 服务器", 215), ("kind", "上层协议", 85),
+                                  ("address", "网址 / SSH别名", 650), ("evidence", "来源", 265)):
             self.target_table.heading(key, text=label)
             self.target_table.column(key, width=width, minwidth=60, stretch=key == "address")
         self.target_table.pack(side="left", fill="both", expand=True)
@@ -109,10 +112,11 @@ class NetworkPanel(tk.Toplevel):
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
         self.table = ttk.Treeview(table_frame, columns=self.COLUMNS, show="headings", selectmode="browse")
-        for column, label, width in (("purpose", "用途 / 服务器", 180), ("protocol", "协议", 75), ("state", "系统状态 / 观察状态", 175),
-                                      ("process", "进程（PID）", 165), ("source", "源地址", 190),
-                                      ("target", "目标地址", 190), ("first_seen", "首次观察", 135),
-                                      ("duration", "已观察时长", 105)):
+        for column, label, width in (("purpose", "调用用途", 125), ("protocol", "传输 / 上层", 175),
+                                      ("service", "请求网址 / SSH目标", 300), ("state", "连接状态", 145),
+                                      ("process", "进程（PID）", 145), ("source", "源地址", 170),
+                                      ("target", "目标地址", 170), ("attribution", "归因依据", 220),
+                                      ("first_seen", "首次观察", 130), ("duration", "已观察时长", 100)):
             self.table.heading(column, text=label, command=lambda key=column: self._sort(key))
             self.table.column(column, width=width, minwidth=65, stretch=False)
         self.table.grid(row=0, column=0, sticky="nsew")
@@ -126,14 +130,14 @@ class NetworkPanel(tk.Toplevel):
         self.table.bind("<<TreeviewSelect>>", lambda _: self._render_detail())
         details = ttk.LabelFrame(body, text="选中记录详情", padding=6)
         details.pack(fill="x", pady=(8, 4))
-        self.detail = tk.Text(details, height=6, wrap="word", state="disabled", font=("Microsoft YaHei UI", 9))
+        self.detail = tk.Text(details, height=7, wrap="word", state="disabled", font=("Microsoft YaHei UI", 9))
         self.detail.pack(side="left", fill="both", expand=True)
         detail_scroll = ttk.Scrollbar(details, orient="vertical", command=self.detail.yview)
         detail_scroll.pack(side="right", fill="y")
         self.detail.configure(yscrollcommand=detail_scroll.set)
         self.status_label = ttk.Label(body, textvariable=self.status, foreground="#8a5b11", wraplength=1120)
         self.status_label.pack(anchor="w", pady=(2, 4))
-        notes = ttk.Label(body, text="每3秒本机快照，短连接可能遗漏。网址来自配置；SSH独立于HTTPS，IP不能直接反推出请求网址。", wraplength=1120)
+        notes = ttk.Label(body, text="连接数不是请求数：HTTP可复用连接，本机回环也显示TCP。请求网址按观测关联；候选和未核对会明确标注，不靠443端口或IP猜协议。", wraplength=1320)
         notes.pack(anchor="w")
         body.bind("<Configure>", lambda event: (notes.configure(wraplength=max(400, event.width - 10)),
             self.status_label.configure(wraplength=max(400, event.width - 10))))
@@ -208,9 +212,15 @@ class NetworkPanel(tk.Toplevel):
 
     def _values(self, record, captured_at):
         end = self._observed_until(record, captured_at)
-        return (getattr(record, "purpose", "") or record.process_name, record.protocol,
+        urls = getattr(record, "request_urls", ())
+        service = urls[0] + (f"（另{len(urls)-1}个）" if len(urls) > 1 else "") if urls else getattr(record, "logical_target", "") or "未核对"
+        application = getattr(record, "application_protocol", "") or "未核对"
+        if getattr(record, "attribution", "").startswith("候选"):
+            application += "（候选）"  # 依据列可能在横向视口外，上层列自身也必须标出证据强度。
+        return (getattr(record, "purpose", "") or record.process_name, f"{record.protocol} / {application}", service,
                 state_label(record, bool(self._last_error)), f"{record.process_name}（{record.pid}）",
                 endpoint(record.local_address, record.local_port), endpoint(record.remote_address, record.remote_port),
+                getattr(record, "attribution", "") or "仅系统连接表，未观测到应用请求",
                 timestamp(record.first_seen), duration(end - record.first_seen))
 
     def _observed_until(self, record, captured_at):
@@ -230,11 +240,26 @@ class NetworkPanel(tk.Toplevel):
         self.target_table.delete(*self.target_table.get_children())
         for item in getattr(snapshot, "targets", ()):
             if item.target:
-                self.target_table.insert("", "end", values=(item.purpose, item.kind, item.target))
+                self.target_table.insert("", "end", values=(item.purpose, item.kind, item.target, "应用配置，不能证明已发生请求"))
+        seen = set()
+        for item in reversed(getattr(snapshot, "observations", ())):
+            key = item.pid, item.application_protocol, item.url
+            if key not in seen:
+                self.target_table.insert("", "end", values=(f"{item.purpose}（PID {item.pid}）", item.application_protocol,
+                    item.url, f"已观测请求 · {item.evidence} · {timestamp(item.observed_at)}"))
+                seen.add(key)  # 同一网址反复轮询不堆满上方列表；套接字归因仍使用原时间证据。
         current = sum(record.closed_at is None for record in entries)
         warnings = tuple(snapshot.errors)
+        active = [record for record in entries if record.closed_at is None]
+        counts = {"remote": 0, "internal": 0, "listener": 0, "udp": 0}
+        for record in active:
+            classification = getattr(record, "classification", "") or (
+                "listener" if record.state == "LISTEN" else "udp" if record.protocol.startswith("UDP") else
+                "internal" if is_loopback(record.remote_address) else "remote")
+            counts[classification] = counts.get(classification, 0) + 1
         count_text = ("状态未知，未取得可核验的连接记录" if not entries and (warnings or self._last_error) else
-                      f"当前记录 {current}  ·  未再观察到 {len(entries) - current}")
+                      f"当前记录 {current}：远端TCP {counts['remote']} / 回环TCP {counts['internal']} / 监听 {counts['listener']} / UDP {counts['udp']}"
+                      f"  ·  未再观察到 {len(entries) - current}")
         self.summary.set(f"{count_text}  ·  "
                          f"快照 {timestamp(snapshot.captured_at)}  ·  读取 {snapshot.elapsed_seconds:.2f} 秒"
                          + ("  ·  读取不完整" if warnings or self._last_error else ""))
@@ -276,11 +301,17 @@ class NetworkPanel(tk.Toplevel):
         if record is None:
             text = "点击一条记录查看系统状态、PID、源/目标端点及观察时间。"
         else:
+            urls = getattr(record, "request_urls", ())
+            address = "\n".join(urls) if urls else getattr(record, "logical_target", "") or "尚无可对应此TCP端点的请求观测"
             text = (f"进程：{record.process_name}  PID：{record.pid}  进程启动：{timestamp(record.process_started_at, True)}\n"
-                    f"用途：{getattr(record, 'purpose', '') or '系统连接'}  配置目标：{getattr(record, 'logical_target', '') or '未核对当前TCP对应网址'}\n"
-                    f"协议：{record.protocol}  原始状态：{record.state}  观察状态：{state_label(record, bool(self._last_error))}\n"
+                    f"调用用途：{getattr(record, 'purpose', '') or '系统连接'}  传输：{record.protocol}  上层：{getattr(record, 'application_protocol', '') or '未核对'}\n"
+                    f"请求网址 / SSH目标：{address}\n"
+                    f"归因依据：{getattr(record, 'attribution', '') or '仅系统连接表，没有匹配的应用请求证据'}\n"
+                    f"请求观测：{timestamp(getattr(record, 'request_observed_at', 0), True)}；同一连接可复用多个请求，列表最多保留8个不同网址。\n"
+                    f"原始状态：{record.state}  观察状态：{state_label(record, bool(self._last_error))}\n"
                     f"源地址：{endpoint(record.local_address, record.local_port)}\n"
                     f"目标地址：{endpoint(record.remote_address, record.remote_port)}\n"
+                    f"路由提示：{getattr(record, 'network_hint', '') or '系统端点不提供实际DIRECT/PROXY规则结果'}\n"
                     f"首次观察：{timestamp(record.first_seen, True)}  最近观察：{timestamp(record.last_seen, True)}\n"
                     f"未再观察到：{timestamp(record.closed_at, True) if record.closed_at is not None else '—'}\n"
                     f"记录标识：{record.id}\n"

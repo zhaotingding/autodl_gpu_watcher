@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections import deque
 import os
 import threading
 import time
-from urllib.parse import urlsplit, urlunsplit
 
+from .network_attribution import (address_hint, is_loopback, normalized_address,
+                                  observation_process_matches, parse_observation, safe_target)
 from .network_system import read_system_snapshot
 
 
@@ -27,6 +29,13 @@ class ConnectionRecord:
     closed_at: float | None = None
     purpose: str = ""
     logical_target: str = ""
+    application_protocol: str = ""
+    request_urls: tuple[str, ...] = ()
+    attribution: str = ""
+    network_hint: str = ""
+    classification: str = ""
+    request_observed_at: float = 0
+    attribution_strength: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,18 +46,6 @@ class ServiceTarget:
     target: str
 
 
-def safe_target(value):
-    try:
-        parts = urlsplit(value)
-        if parts.scheme not in {"http", "https", "ssh"} or not parts.hostname:
-            return "地址未配置"
-        host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-        netloc = host + (f":{parts.port}" if parts.port else "")
-        return urlunsplit((parts.scheme, netloc, parts.path, "", ""))  # 查询参数、口令及片段不进入详情面板。
-    except (TypeError, ValueError):
-        return "地址格式无效"
-
-
 @dataclass(frozen=True, slots=True)
 class NetworkSnapshot:
     captured_at: float
@@ -56,6 +53,7 @@ class NetworkSnapshot:
     errors: tuple[str, ...]
     elapsed_seconds: float
     targets: tuple[ServiceTarget, ...] = ()
+    observations: tuple = ()
 
 
 class NetworkMonitor:
@@ -67,12 +65,58 @@ class NetworkMonitor:
         self._current, self._history = {}, []
         self._sequence = 0
         self._targets = ()
+        self._incoming = deque(maxlen=512)
+        self._observations = deque(maxlen=512)  # 请求证据只在内存保留有界窗口，不能成为无限日志。
+        self._observation_lock = threading.Lock()
         self._lock = threading.Lock()  # 面板反复打开也不能并发读取或写坏历史。
 
     def set_targets(self, targets):
         self._targets = tuple(ServiceTarget(int(item.get("pid", 0)), str(item["kind"]),
             str(item["purpose"]), safe_target(item["target"]) if item.get("target") else "")
             for item in targets)  # 主线程只换不可变快照，不等待后台原生读表锁。
+
+    def add_observation(self, value):
+        observation = parse_observation(value)
+        if observation is None:
+            return False
+        with self._observation_lock:
+            self._incoming.append(observation)  # 不等待读取系统连接表的锁，GUI接收请求事件仍及时。
+        return True
+
+    def _request_evidence(self, process, record, owned, captured_at):
+        candidates, exact, process_requests = [], [], []
+        for observation in self._observations:
+            if (not record.protocol.startswith("TCP") or observation.observed_at > captured_at + 1
+                    or observation.observed_at < record.first_seen - 30
+                    or not observation_process_matches(observation, process, owned)
+                    or (observation.process_name and observation.process_name.casefold() != process.name.casefold())):
+                continue
+            if observation.evidence == "process-request":
+                if record.remote_port and record.state != "LISTEN" and not is_loopback(record.remote_address):
+                    process_requests.append(observation)  # 只证明该进程发过请求，不能断言命中了这个TCP。
+                continue
+            if (observation.remote_port != record.remote_port
+                    or normalized_address(observation.remote_address) != normalized_address(record.remote_address)
+                    or not observation.remote_address):
+                continue
+            if observation.evidence == "requests" and observation.local_address and observation.local_port:
+                if (observation.scope == "process" and observation.local_port == record.local_port
+                        and normalized_address(observation.local_address) == normalized_address(record.local_address)):
+                    exact.append(observation)
+                # 已知本机端点却不匹配，应排除此连接，不能降为同对端候选。
+            else:
+                candidates.append(observation)  # 缺少本机端口，不能把浏览器对端候选写成精确连接映射。
+        matches = sorted(exact or candidates or process_requests, key=lambda item: item.observed_at)
+        if not matches:
+            return {}
+        urls = tuple(dict.fromkeys(item.url for item in reversed(matches)))[:8]
+        latest = matches[-1]
+        return dict(application_protocol=" / ".join(dict.fromkeys(item.application_protocol for item in matches)),
+                    request_urls=urls, request_observed_at=latest.observed_at, purpose=latest.purpose,
+                    attribution_strength=3 if exact else 2 if candidates else 1,
+                    logical_target=urls[0], attribution="已匹配：请求PID及TCP源/目标IP和端口" if exact else
+                    "候选：请求进程范围及对端；本机端口未核对" if candidates else
+                    "候选：进程请求记录，未核对端点（不能证明此TCP访问了该网址）")
 
     @staticmethod
     def _context(process, owned, targets):
@@ -132,6 +176,11 @@ class NetworkMonitor:
                     errors.append("部分子进程在读表期间启动，本轮暂不归属其连接，等待下一次核对。")
                 owned = {pid: process for pid, process in owned.items() if pid not in changed}
             observed = {}
+            with self._observation_lock:
+                self._observations.extend(self._incoming)
+                self._incoming.clear()
+            self._observations = deque((item for item in self._observations
+                if captured_at - 900 <= item.observed_at <= time.time() + 5), maxlen=512)  # 读表期间新来的证据留给下轮，不能误删。
             targets = self._targets
             by_pid = {item.pid: item for item in targets if item.pid}
             for item in sockets:
@@ -147,9 +196,30 @@ class NetworkMonitor:
                         process.created_at, item.protocol, item.local_address, item.local_port,
                         item.remote_address, item.remote_port, item.state, captured_at, captured_at)
                 context = self._context(process, owned, by_pid)
-                observed[key] = replace(old, state=item.state, last_seen=captured_at,
-                    purpose=context.purpose if context else "系统子进程",
-                    logical_target=context.target if context and context.kind == "SSH" else "")
+                classification = ("listener" if item.state == "LISTEN" else "udp" if item.protocol.startswith("UDP")
+                                  else "internal" if is_loopback(item.remote_address) else "remote")
+                attributes = dict(purpose=context.purpose if context else "系统子进程",
+                    logical_target=context.target if context and context.kind == "SSH" else "",
+                    classification=classification, network_hint=address_hint(item.local_address, item.remote_address))
+                if context and context.kind == "SSH":
+                    attributes.update(application_protocol="SSH", attribution="应用管理的SSH进程及连接配置")
+                else:
+                    attributes.update(self._request_evidence(process, old, owned, captured_at))
+                    if (old.attribution_strength > attributes.get("attribution_strength", 0)
+                            or (not attributes.get("application_protocol") and old.application_protocol)):
+                        # 同一持续活动连接保留更强的已知事实；新弱候选不能覆盖较早的端点匹配。
+                        attributes.update(application_protocol=old.application_protocol, request_urls=old.request_urls,
+                            request_observed_at=old.request_observed_at, logical_target=old.logical_target,
+                            attribution=old.attribution, attribution_strength=old.attribution_strength, purpose=old.purpose)
+                    if classification == "internal" and not attributes.get("application_protocol"):
+                        paired = any(other.pid == item.pid and other.protocol == item.protocol
+                            and other.local_port == item.remote_port and other.remote_port == item.local_port
+                            and normalized_address(other.local_address) == normalized_address(item.remote_address)
+                            and normalized_address(other.remote_address) == normalized_address(item.local_address)
+                            for other in sockets)
+                        attributes.update(application_protocol="本机内部通信" if paired else "回环上层未核对",
+                            attribution="系统表：同PID成对回环端点" if paired else "系统表：本机回环端点，具体调用未核对")
+                observed[key] = replace(old, state=item.state, last_seen=captured_at, **attributes)
             for key, old in self._current.items():
                 if key in observed:
                     continue
@@ -161,4 +231,5 @@ class NetworkMonitor:
             self._history = self._history[-self.history_limit:] if self.history_limit else []
             entries = tuple(sorted(observed.values(), key=lambda row: row.first_seen, reverse=True))
             entries += tuple(reversed(self._history))  # 历史上限仅约束结束记录，不截断当前连接。
-            return NetworkSnapshot(captured_at, entries, tuple(errors), time.monotonic() - started, targets)
+            return NetworkSnapshot(captured_at, entries, tuple(errors), time.monotonic() - started,
+                                   targets, tuple(self._observations))

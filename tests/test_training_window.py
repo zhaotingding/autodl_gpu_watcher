@@ -115,17 +115,72 @@ class TrainingWindowTest(unittest.TestCase):
             start.assert_not_called()
             stop.assert_not_called()
 
-    def test_server_form_saves_pin_selection_for_arbitrary_server(self):
+    def test_server_form_pin_click_saves_immediately_for_arbitrary_server(self):
         from autodl_watcher.training_config import load_servers
         self.window.edit_server("s")
         dialog = self.window.settings_window
         pin = next(item for item in descendants(dialog.server_form)
-                   if isinstance(item, gui.ttk.Checkbutton) and item.cget("text") == "固定到顶部标签")
+                   if isinstance(item, gui.ttk.Checkbutton) and item.cget("text").startswith("固定到顶部标签"))
         pin.invoke()
-        next(item for item in descendants(dialog.server_form)
-             if isinstance(item, gui.ttk.Button) and item.cget("text") == "保存连接").invoke()
         self.assertFalse(load_servers(self.window.server_file)[0].pinned)
         self.assertEqual(self.window.notebook.tab(self.window.external_panes["s"][0], "state"), "hidden")
+        self.assertTrue(any("已取消固定" in text for text in self.texts(dialog)))
+
+    def test_pin_click_does_not_submit_unsaved_connection_fields_or_replace_pending(self):
+        from dataclasses import replace
+        from autodl_watcher.training_config import load_servers
+        state = self.window.training.states["s"]
+        pending = replace(state["server"], ssh_alias="pending-host")
+        state.update(active=True, due=float("inf"), pending=pending)
+        connection = state["connection"]
+        self.window.edit_server("s")
+        dialog = self.window.settings_window
+        fields = [item for item in descendants(dialog.server_form) if isinstance(item, gui.ttk.Entry)]
+        fields[1].delete(0, "end"); fields[1].insert(0, "unsaved-new-host")
+        pin = next(item for item in descendants(dialog.server_form)
+                   if isinstance(item, gui.ttk.Checkbutton) and item.cget("text").startswith("固定到顶部标签"))
+        with patch.object(self.window.training, "register") as register, patch.object(self.window.training, "stop") as stop:
+            pin.invoke()
+        saved = load_servers(self.window.server_file)[0]
+        self.assertFalse(saved.pinned)
+        self.assertEqual(saved.ssh_alias, "server")
+        self.assertEqual(fields[1].get(), "unsaved-new-host")
+        self.assertTrue(state["active"])
+        self.assertIs(state["connection"], connection)
+        self.assertIs(state["pending"], pending)
+        register.assert_not_called()
+        stop.assert_not_called()
+
+    def test_failed_immediate_pin_save_restores_checkbox_and_saved_state(self):
+        from autodl_watcher.training_config import load_servers
+        self.window.edit_server("s")
+        dialog = self.window.settings_window
+        pin = next(item for item in descendants(dialog.server_form)
+                   if isinstance(item, gui.ttk.Checkbutton) and item.cget("text").startswith("固定到顶部标签"))
+        with patch.object(gui, "save_servers", side_effect=OSError("模拟无法保存固定设置")):
+            pin.invoke()
+        self.assertTrue(pin.instate(("selected",)))
+        self.assertTrue(load_servers(self.window.server_file)[0].pinned)
+        self.assertEqual(self.window.notebook.tab(self.window.external_panes["s"][0], "state"), "normal")
+        self.assertTrue(any("固定设置保存失败" in text for text in self.texts(dialog)))
+
+    def test_new_server_pin_is_only_persisted_after_connection_save(self):
+        from autodl_watcher.training_config import load_servers
+        before = self.window.server_file.read_bytes()
+        self.window.edit_server()
+        dialog = self.window.settings_window
+        pin = next(item for item in descendants(dialog.server_form)
+                   if isinstance(item, gui.ttk.Checkbutton) and item.cget("text").startswith("固定到顶部标签"))
+        pin.invoke()
+        self.assertEqual(self.window.server_file.read_bytes(), before)
+        self.assertTrue(any("请先保存新服务器连接" in text for text in self.texts(dialog)))
+        fields = [item for item in descendants(dialog.server_form) if isinstance(item, gui.ttk.Entry)]
+        fields[1].insert(0, "new-host")
+        next(item for item in descendants(dialog.server_form)
+             if isinstance(item, gui.ttk.Button) and item.cget("text") == "保存连接").invoke()
+        saved = next(item for item in load_servers(self.window.server_file) if item.ssh_alias == "new-host")
+        self.assertTrue(saved.pinned)
+        self.assertEqual(self.window.notebook.tab(self.window.external_panes[saved.id][0], "state"), "normal")
 
     def test_card_states_preserve_metrics_and_disconnection_is_not_idle(self):
         pane = self.pane

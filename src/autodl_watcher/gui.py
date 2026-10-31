@@ -17,6 +17,7 @@ from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
+from .network_activity import NETWORK_PREFIX, emit_observation, set_observer
 from .launcher import child_environment, project_python as worker_python
 from .app_icon import IconManager
 from .cli import normalize_host, positive_seconds
@@ -213,13 +214,20 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.resource_split = ttk.Panedwindow(page, orient="vertical")
         self.resource_split.pack(fill="both", expand=True)
         resource_area = ttk.Frame(self.resource_split)
-        self.resource_split.add(resource_area, weight=4)
+        self.resource_split.add(resource_area, weight=3)
+        controls = ttk.Frame(resource_area)
+        controls.pack(fill="x", pady=(0, 4))  # 放在资源表上方，滚动或调小资源区时仍先展示启停入口。
+        self.start_button = ttk.Button(controls, text="开始GPU监控", command=self.start, width=12)
+        self.start_button.pack(side="left")
+        self.stop_button = ttk.Button(controls, text="停止GPU监控", command=self.stop, state="disabled", width=12)
+        self.stop_button.pack(side="left", padx=4)
+        ttk.Label(controls, text="平台/GPU同启停；SSH页独立", foreground="#667085").pack(side="left", padx=8)
         body = ttk.Frame(resource_area)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
         self.table = ttk.Treeview(body, columns=("slots", "memory", "util", "capacity", "observed", "state"),
-                                 show="tree headings", height=16, selectmode="browse")
+                                 show="tree headings", height=12, selectmode="browse")  # 小窗口为黑框保留可读高度，GPU列表仍可滚动。
         self.table.heading("#0", text="服务器 / GPU", anchor="w")
         self.table.column("#0", width=160, minwidth=145, stretch=True, anchor="w")
         for column, title, width in [("slots", "空闲/总数", 70), ("memory", "显存占用率", 170),
@@ -237,12 +245,6 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         horizontal = ttk.Scrollbar(body, orient="horizontal", command=self.table.xview)
         horizontal.grid(row=1, column=0, sticky="ew")
         self.table.configure(yscrollcommand=scroll.set, xscrollcommand=horizontal.set)
-        controls = ttk.Frame(resource_area)
-        controls.pack(fill="x", pady=4)
-        self.start_button = ttk.Button(controls, text="开始监控", command=self.start, width=8)
-        self.start_button.pack(side="left")
-        self.stop_button = ttk.Button(controls, text="停止监控", command=self.stop, state="disabled", width=8)
-        self.stop_button.pack(side="left", padx=4)
         self.status_label = ttk.Label(resource_area, textvariable=self.status, foreground="#245cc4", wraplength=930)
         self.status_label.pack(anchor="w", fill="x", pady=4)
         resource_area.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(200, event.width - 10)))
@@ -254,10 +256,10 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                     status_level(window.status.get()), "#245cc4"))
         self.status.trace_add("write", update_status)  # 不让Tcl变量回调强持整个窗口，避免循环延迟到后台回收。
         output = ttk.LabelFrame(self.resource_split, text="实时监控", padding=2)
-        self.resource_split.add(output, weight=1)  # 可拖动分隔线，资源区优先使用空白，黑框仍可查看。
+        self.resource_split.add(output, weight=2)  # 默认提高黑框占比，仍可拖动分隔线重新分配空间。
         horizontal = ttk.Scrollbar(output, orient="horizontal")
         horizontal.pack(side="bottom", fill="x")
-        self.log = ScrolledText(output, height=5, wrap="none", state="disabled", font=("Microsoft YaHei UI", 9),
+        self.log = ScrolledText(output, height=9, wrap="none", state="disabled", font=("Microsoft YaHei UI", 9),
                                 xscrollcommand=horizontal.set, background="#17202e", foreground="#e2e8f0", padx=8, pady=6)
         horizontal.configure(command=self.log.xview)
         self.log.tag_configure("success", foreground="#79e69d")
@@ -327,11 +329,15 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         window.lift()
         return window
 
-    def open_network(self):
+    def _ensure_network_monitor(self):
         from .network_monitor import NetworkMonitor
-        from .network_ui import NetworkPanel
         if self.network_monitor is None:
-            self.network_monitor = NetworkMonitor()  # 后台只读取本机状态，不触发平台或 SSH 采样。
+            self.network_monitor = NetworkMonitor()  # 仅创建有界请求存储；不打开面板就不轮询系统表。
+        return self.network_monitor
+
+    def open_network(self):
+        from .network_ui import NetworkPanel
+        self._ensure_network_monitor()
         if self.network_window is None or not self.network_window.winfo_exists():
             self.network_window = NetworkPanel(self.root, self.network_monitor, targets_provider=self._network_targets)
         self.network_window.show()  # 单窗口复用；关闭详情不会断开业务连接。
@@ -566,6 +572,8 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                             reschedule = False
                             self.root.destroy()
                             return
+                    elif value.startswith(NETWORK_PREFIX):
+                        self._ensure_network_monitor().add_observation(json.loads(value[len(NETWORK_PREFIX):]))
                     elif value.startswith(SESSION_PREFIX):
                         data = json.loads(value[len(SESSION_PREFIX):])
                         self._session(data["status"], data["message"], data["checked_at"])
@@ -695,6 +703,7 @@ def discover():  # 子进程模式：采集结果编码为一行 JSON，供父�
     from .collectors.platform import PlatformAuthenticationError
     config = load_config(default_config_path(ROOT))
     collector = PlatformBrowserCollector(config.platform)
+    previous = set_observer(emit_observation)  # 一次性刷新同样报告已发生的真实请求。
     try:
         emit_session("checking", "正在核验真实主机接口")
         hosts = collector.collect()
@@ -744,6 +753,7 @@ def discover():  # 子进程模式：采集结果编码为一行 JSON，供父�
             collector.close()  # 刷新成功与否都释放浏览器上下文，供后续任务使用。
         except Exception as exc:
             print(f"刷新浏览器清理失败：{exc}", flush=True)
+        set_observer(previous)
 
 
 def main():  # 同一模块既可作为桌面入口，也可作为无界面的主机发现子进程。
@@ -757,8 +767,12 @@ def main():  # 同一模块既可作为桌面入口，也可作为无界面的�
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AutoDL.GPUWatcher")
     root = tk.Tk()
-    WatcherWindow(root, debug=args.debug)
-    root.mainloop()  # Tk 处理用户输入、重绘和 after 回调，直到窗口被销毁。
+    window = WatcherWindow(root, debug=args.debug)
+    previous = set_observer(window._ensure_network_monitor().add_observation)  # AI线程只调用纯数据存储，不引用Tk对象。
+    try:
+        root.mainloop()  # Tk 处理用户输入、重绘和 after 回调，直到窗口被销毁。
+    finally:
+        set_observer(previous)
 
 
 if __name__ == "__main__":
