@@ -4,6 +4,7 @@ import queue
 import sqlite3
 import threading
 import tkinter as tk
+from .theme import Label as ThemeLabel  # 状态文字随深浅主题保持可读。
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
@@ -97,41 +98,41 @@ class AISettings(ttk.Frame):
             tabs.add(page, text=label)
         connection.columnconfigure(1, weight=1)
         for row, (name, label) in enumerate((("base_url", "API 基础地址"), ("protocol", "接口协议"), ("model", "模型 ID"), ("service_tier", "服务等级"))):
-            ttk.Label(connection, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=5)
+            ThemeLabel(connection, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=5)
             variable = self.variables[name] = tk.StringVar(value=config[name])
             if name in {"protocol", "service_tier"}:
                 field = ttk.Combobox(connection, textvariable=variable, values=("responses", "chat") if name == "protocol" else ("flex", "default"), state="readonly")
             else:
                 field = ttk.Entry(connection, textvariable=variable)
             field.grid(row=row, column=1, padx=8, pady=5, sticky="ew")
-        ttk.Label(connection, text="API 密钥").grid(row=4, column=0, sticky="w", padx=8, pady=5)
+        ThemeLabel(connection, text="API 密钥").grid(row=4, column=0, sticky="w", padx=8, pady=5)
         self.key = ttk.Entry(connection, show="●")
         self.key.grid(row=4, column=1, padx=8, pady=5, sticky="ew")
         self.auto = tk.BooleanVar(value=config.get("auto_generate", False))
         ttk.Checkbutton(connection, text="新训练自动生成监控规则（每任务一次，会发送日志并产生费用）", variable=self.auto, style="Watcher.TCheckbutton").grid(row=5, column=0, columnspan=2, padx=8, pady=6, sticky="w")
-        ttk.Label(connection, text="适用于 AutoDL、4090 和以后新增的所有服务器；任务规则分别保存。\nflex 为弹性等级，default 为 Standard；失败不自动提价重试。\n密钥独立存于 Windows 凭据管理器，留空保留此地址已存密钥。\n仅生成规则时调用AI；日常采样使用本地规则。保存不代表API验证成功。", wraplength=620).grid(row=6, column=0, columnspan=2, padx=8, pady=8, sticky="w")
+        ThemeLabel(connection, text="适用于 AutoDL、4090 和以后新增的所有服务器；任务规则分别保存。\nflex 为弹性等级，default 为 Standard；失败不自动提价重试。\n密钥独立存于 Windows 凭据管理器，留空保留此地址已存密钥。\n仅生成规则时调用AI；日常采样使用本地规则。保存不代表API验证成功。", wraplength=620).grid(row=6, column=0, columnspan=2, padx=8, pady=8, sticky="w")
         ttk.Button(connection, text="删除此地址密钥", command=self.delete_key).grid(row=7, column=1, sticky="e", padx=8)
-        ttk.Label(prompt, text="所有服务器生成规则时共用。保存后用于后续请求；已有规则需手动更新。\n固定JSON格式契约由程序补充；这里配置指标与显示需求，不填写Shell命令。", wraplength=620).pack(anchor="w", pady=6)
+        ThemeLabel(prompt, text="所有服务器生成规则时共用。保存后用于后续请求；已有规则需手动更新。\n固定JSON格式契约由程序补充；这里配置指标与显示需求，不填写Shell命令。", wraplength=620).pack(anchor="w", pady=6)
         limit_bar = ttk.Frame(prompt)
         limit_bar.pack(fill="x", pady=(0, 6))
-        ttk.Label(limit_bar, text="单次日志字符上限：").pack(side="left")
+        ThemeLabel(limit_bar, text="单次日志字符上限：").pack(side="left")
         self.log_limit = tk.StringVar(value=str(config.get("max_log_chars", DEFAULT_LOG_CHARS)))
         ttk.Entry(limit_bar, textvariable=self.log_limit, width=12).pack(side="left")
-        ttk.Label(limit_bar, text="超限拒绝发送；请按模型上下文和费用设置。", wraplength=380).pack(side="left", padx=8)
+        ThemeLabel(limit_bar, text="超限拒绝发送；请按模型上下文和费用设置。", wraplength=380).pack(side="left", padx=8)
         self.prompt = ScrolledText(prompt, height=12, wrap="word", font=("Microsoft YaHei UI", 10))
         self.prompt.pack(fill="both", expand=True)
         self.prompt.insert("1.0", config.get("prompt", DEFAULT_PROMPT))
         ttk.Button(prompt, text="恢复默认提示词（保存后生效）", command=self.reset_prompt).pack(anchor="e", pady=8)
-        ttk.Label(pricing, text="Standard 单价：美元 / 百万Token；Flex 按下方系数折算。\n与当前模型及地址绑定；费用按调用时单价保存，修改不会重算历史。", wraplength=620).grid(row=0, column=0, columnspan=2, sticky="w", pady=8)
+        ThemeLabel(pricing, text="Standard 单价：美元 / 百万Token；Flex 按下方系数折算。\n与当前模型及地址绑定；费用按调用时单价保存，修改不会重算历史。", wraplength=620).grid(row=0, column=0, columnspan=2, sticky="w", pady=8)
         prices = pricing_settings(config)
         self.price_scope = (prices["base_url"], prices["model"])
         self.prices = {}
         for row, (name, label) in enumerate((("input", "普通输入"), ("cached", "缓存命中"), ("write", "缓存写入"), ("output", "输出"), ("flex_multiplier", "Flex 系数"), ("usd_cny", "美元兑人民币估算汇率")), 1):
-            ttk.Label(pricing, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+            ThemeLabel(pricing, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=6)
             self.prices[name] = tk.StringVar(value="" if prices[name] is None else str(prices[name]))
             ttk.Entry(pricing, textvariable=self.prices[name], width=25).grid(row=row, column=1, padx=8, pady=6)
         ttk.Button(pricing, text="填入 gpt-6-luna 官方案例价", command=self.preset_prices).grid(row=7, column=0, columnspan=2, pady=8, sticky="w")
-        ttk.Label(pricing, text="案例：2026-10-07 官方标准价，Flex 0.5倍，汇率7.0仅为估计。\n其它模型或第三方接口请填写自己的单价；留空则费用显示未知。\n缓存明细未返回时暂按0估算并标注，账单可能不同。", wraplength=620).grid(row=8, column=0, columnspan=2, sticky="w")
+        ThemeLabel(pricing, text="案例：2026-10-07 官方标准价，Flex 0.5倍，汇率7.0仅为估计。\n其它模型或第三方接口请填写自己的单价；留空则费用显示未知。\n缓存明细未返回时暂按0估算并标注，账单可能不同。", wraplength=620).grid(row=8, column=0, columnspan=2, sticky="w")
         self.usage = UsageStore(path.with_name("ai_usage.sqlite3"))
         self._usage_results, self._usage_timer, self._usage_pending = queue.Queue(), None, False
         self.bind("<Destroy>", self._destroyed)
@@ -139,7 +140,7 @@ class AISettings(ttk.Frame):
         self.usage_text.pack(fill="both", expand=True)
         ttk.Button(usage, text="刷新用量", command=self.refresh_usage).pack(anchor="e", pady=8)
         tabs.bind("<<NotebookTabChanged>>", lambda event: self.refresh_usage() if tabs.select() == str(usage) else None)
-        self.status = ttk.Label(self, text=error, wraplength=670)
+        self.status = ThemeLabel(self, text=error, wraplength=670)
         self.status.pack(fill="x", padx=16)
         ttk.Button(self, text="保存", command=self.save).pack(anchor="e", padx=16, pady=8)
         if not error:
@@ -246,11 +247,11 @@ class AnalysisWindow(tk.Toplevel):
         self.minsize(780, 600)
         self.config_snapshot = dict(assistant.config)
         target = self.config_snapshot["base_url"] + " · " + (self.config_snapshot["model"] or "尚未配置模型") + " · " + self.config_snapshot["service_tier"]
-        ttk.Label(self, text="规则验证通过后直接更新本任务卡片，后续采样复用规则；日志含义仍可能判断错误。", wraplength=760).pack(anchor="w", padx=8, pady=4)
-        ttk.Label(self, text="全局接口：" + target, wraplength=760).pack(anchor="w", padx=8)
+        ThemeLabel(self, text="规则验证通过后直接更新本任务卡片，后续采样复用规则；日志含义仍可能判断错误。", wraplength=760).pack(anchor="w", padx=8, pady=4)
+        ThemeLabel(self, text="全局接口：" + target, wraplength=760).pack(anchor="w", padx=8)
         log_bar = ttk.Frame(self)
         log_bar.pack(fill="x", padx=8, pady=4)
-        ttk.Label(log_bar, text="训练日志：").pack(side="left")
+        ThemeLabel(log_bar, text="训练日志：").pack(side="left")
         self.log_sources = {item["path"]: item for item in card.get("log_sources", [])}
         self.log_sources.setdefault(card.get("log_path", ""), {"path": card.get("log_path", ""),
             "identity": card.get("log_identity", ""), "size": card.get("log_size")})
@@ -260,7 +261,7 @@ class AnalysisWindow(tk.Toplevel):
         self.log_choice.bind("<<ComboboxSelected>>", lambda _: self.read_full_log())
         self.reload = ttk.Button(log_bar, text="重读完整日志", command=self.read_full_log)
         self.reload.pack(side="right", padx=(6, 0))
-        self.source_info = ttk.Label(self, text="正在读取所选训练日志；只预览，不会自动发送AI请求。", wraplength=760)
+        self.source_info = ThemeLabel(self, text="正在读取所选训练日志；只预览，不会自动发送AI请求。", wraplength=760)
         self.source_info.pack(anchor="w", padx=8, pady=(0, 4))
         self.source = ScrolledText(self, height=12, wrap="word", font=("Consolas", 9))
         self.source.pack(fill="both", expand=True, padx=8)
@@ -269,7 +270,7 @@ class AnalysisWindow(tk.Toplevel):
         bar.pack(fill="x", padx=8, pady=5)
         self.send = ttk.Button(bar, text="生成并应用规则（会产生费用）", command=self.start)
         self.send.pack(side="left")
-        self.status = ttk.Label(self, text="使用全局配置；更改设置后请重新打开本窗口。", wraplength=760)
+        self.status = ThemeLabel(self, text="使用全局配置；更改设置后请重新打开本窗口。", wraplength=760)
         self.status.pack(anchor="w", padx=8)
         self.output = ScrolledText(self, height=12, wrap="word", state="disabled", font=("Microsoft YaHei UI", 9))
         self.output.pack(fill="both", expand=True, padx=8, pady=8)

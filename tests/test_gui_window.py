@@ -247,7 +247,7 @@ class GuiWindowTest(unittest.TestCase):
         self.window.events.put(("line", gui.REPORT_PREFIX + json.dumps({"lines": [headline, "  203-1[#0:失败也是名字]"], "level": "success"})))
         self.window._drain()
         self.assertEqual(self.window.status.get(), headline)
-        self.assertEqual(str(self.window.status_label.cget("foreground")), "#18733a")
+        self.assertEqual(str(self.window.status_label.cget("foreground")), self.root._watcher_palette["success"])
         output = self.window.log.get("1.0", "end")
         self.assertIn(headline, output)
         self.assertIn("203-1[#0:失败也是名字]", output)
@@ -265,7 +265,7 @@ class GuiWindowTest(unittest.TestCase):
                 "[12:32:02] 监控203-1 | 实例状态：无卡运行 | 动作：等待", "  203-1[#0:成功]"], "level": level})))
             self.window._drain()
             self.assertEqual(str(self.window.status_label.cget("foreground")),
-                             "#b42318" if level == "error" else "#245cc4")
+                             self.root._watcher_palette["error" if level == "error" else "accent"])
             self.assertNotIn("#0:成功", self.window.status.get())  # 当前状态不重复展开占用详情。
         self.assertEqual(self.window.log.tag_names("1.0"), ("error",))
         self.assertEqual(self.window.log.tag_names("3.0"), ("normal",))
@@ -572,16 +572,18 @@ class GuiWindowTest(unittest.TestCase):
         style = gui.ttk.Style(self.root)
         self.assertIn("Watcher.indicator", style.element_names())
         unchecked, checked = self.window.check_images
-        self.assertEqual(unchecked.get(5, 9), (255, 255, 255))
-        self.assertEqual(checked.get(5, 9), (36, 92, 196))
-        self.assertEqual(checked.get(5, 5), (255, 255, 255))  # 左上角无斜线：不是原先的X图形。
-        self.assertEqual(checked.get(12, 6), (36, 92, 196))
+        field = tuple(value // 257 for value in self.root.winfo_rgb(self.root._watcher_palette["field"]))
+        accent = tuple(value // 257 for value in self.root.winfo_rgb(self.root._watcher_palette["accent"]))
+        self.assertEqual(unchecked.get(5, 9), field)
+        self.assertEqual(checked.get(5, 9), accent)
+        self.assertEqual(checked.get(5, 5), field)  # 左上角无斜线：切换主题仍是✓，不是X。
+        self.assertEqual(checked.get(12, 6), accent)
         self.window.events.put(("line", "Telemetry容错：单次超时20秒；瞬时失败重试\n"))
         self.window.events.put(("line", "本人 GPU 占用 有（本轮弹窗）\n"))
         self.window.events.put(("line", "连接断开，采集失败\n"))
         self.window._drain()
         self.assertEqual(self.window.status.get(), "连接断开，采集失败")
-        self.assertEqual(str(self.window.status_label.cget("foreground")), "#b42318")
+        self.assertEqual(str(self.window.status_label.cget("foreground")), self.root._watcher_palette["error"])
         self.assertIn("连接断开，采集失败", self.window.log.get("1.0", "end"))
 
     def test_background_output_stop_and_restart(self):

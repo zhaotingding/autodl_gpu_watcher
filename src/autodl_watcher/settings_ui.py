@@ -1,6 +1,7 @@
 """所有服务器共用的设置窗口。"""
 from dataclasses import replace  # 编辑时创建新配置，保留正在使用的配置快照。
 import tkinter as tk
+from .theme import Label as ThemeLabel  # 状态文字随深浅主题保持可读。
 from tkinter import ttk
 import weakref
 
@@ -17,6 +18,24 @@ class GlobalSettings(tk.Toplevel):
         self.geometry("850x700")
         self.minsize(780, 630)
         self.protocol("WM_DELETE_WINDOW", self.withdraw)
+        appearance = ttk.Frame(self, padding=(10, 8))
+        appearance.pack(fill="x")
+        ThemeLabel(appearance, text="界面主题：").pack(side="left")
+        names = {"深色": "dark", "浅色": "light"}
+        self.theme_choice = tk.StringVar(self, value="深色" if app.theme.name == "dark" else "浅色")
+        self.theme_combo = ttk.Combobox(appearance, textvariable=self.theme_choice, values=tuple(names), state="readonly", width=9)
+        self.theme_combo.pack(side="left", padx=6)
+        self.theme_status = ThemeLabel(appearance, text="选择后保存到本地YAML，并应用到所有窗口。")
+        self.theme_status.pack(side="left", padx=8)
+        def choose_theme(_event=None):
+            try:
+                app.theme.save(names[self.theme_choice.get()])
+            except (OSError, ValueError) as exc:
+                self.theme_choice.set("深色" if app.theme.name == "dark" else "浅色")
+                self.theme_status.configure(text=f"主题保存失败：{exc}", foreground="#b42318")
+                return
+            self.theme_status.configure(text="主题已保存并应用。", foreground="#245c45")
+        self.theme_combo.bind("<<ComboboxSelected>>", choose_theme)
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
         servers = ttk.Frame(self.tabs, padding=8)
@@ -37,7 +56,7 @@ class GlobalSettings(tk.Toplevel):
         self.server_form = ttk.Frame(servers)
         self.server_form.pack(side="left", fill="both", expand=True)
         self.server_form.columnconfigure(1, weight=1)
-        ttk.Label(self.server_form, text="选择服务器配置SSH连接；未配置的AutoDL入口也可设置。", wraplength=470).pack(anchor="w")
+        ThemeLabel(self.server_form, text="选择服务器配置SSH连接；未配置的AutoDL入口也可设置。", wraplength=470).pack(anchor="w")
         self.refresh_servers()
 
     def build_monitor_settings(self, parent):  # 控件属于设置窗口；输入变量沿用应用的待生效配置。
@@ -46,7 +65,7 @@ class GlobalSettings(tk.Toplevel):
         options.pack(fill="x", pady=3)
         self.inputs = []
         for col, (label, value) in enumerate([("用户", app.user), ("间隔/秒", app.poll)]):
-            ttk.Label(options, text=label).grid(row=0, column=col * 2, sticky="w", padx=2)
+            ThemeLabel(options, text=label).grid(row=0, column=col * 2, sticky="w", padx=2)
             entry = ttk.Entry(options, textvariable=value, width=12 if col == 0 else 6)
             entry.grid(row=0, column=col * 2 + 1, sticky="ew", padx=2, pady=3)
             options.columnconfigure(col * 2 + 1, weight=1)
@@ -58,7 +77,7 @@ class GlobalSettings(tk.Toplevel):
         self.convert_check.grid(row=2, column=0, columnspan=4, sticky="w", pady=2)
         self.save_button = ttk.Button(parent, text="保存监控设置", command=app.save)
         self.save_button.pack(anchor="e", padx=8, pady=8)
-        ttk.Label(parent, text="监控中可以编辑并保存；当前监控保持原设置，下次开始监控生效。", wraplength=700).pack(anchor="w", padx=8)
+        ThemeLabel(parent, text="监控中可以编辑并保存；当前监控保持原设置，下次开始监控生效。", wraplength=700).pack(anchor="w", padx=8)
         self.build_telemetry_settings(parent)
 
     def build_telemetry_settings(self, parent):
@@ -85,18 +104,18 @@ class GlobalSettings(tk.Toplevel):
         self.telemetry_password.trace_add("write", enable_password)  # 弱引用不形成Tk变量循环，避免延迟到工作线程回收。
         for row, (label, variable, secret) in enumerate((("采集 API 地址", self.telemetry_endpoint, False),
                 ("用户名（仅Basic）", self.telemetry_username, False), ("站点密码", self.telemetry_password, True))):
-            ttk.Label(box, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
+            ThemeLabel(box, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
             ttk.Entry(box, textvariable=variable, show="●" if secret else "").grid(row=row, column=1, sticky="ew", pady=3)
         ttk.Checkbutton(box, text="启用站点密码认证", variable=self.telemetry_password_auth,
                         style="Watcher.TCheckbutton").grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Label(box, text="认证方式").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
+        ThemeLabel(box, text="认证方式").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Combobox(box, textvariable=self.telemetry_mode, values=list(telemetry_auth.AUTH_MODES.values()),
                      state="readonly").grid(row=4, column=1, sticky="ew", pady=3)
-        ttk.Label(box, text="此GPU站点选“站点密码登录”，不需要用户名；输入新密码会勾选启用。\n"
+        ThemeLabel(box, text="此GPU站点选“站点密码登录”，不需要用户名；输入新密码会勾选启用。\n"
                   "密码留空保留已有密码，只存 Windows 凭据管理器；登录会话在内存中复用。\n"
                   "保存后在空闲时刷新服务器；监控中的采集地址下次开始生效。保存不代表认证已验证。", wraplength=720).grid(
                       row=5, column=0, columnspan=2, sticky="w", pady=3)
-        self.telemetry_reason = ttk.Label(box, text=error, foreground="#b42318", wraplength=720)
+        self.telemetry_reason = ThemeLabel(box, text=error, foreground="#b42318", wraplength=720)
         self.telemetry_reason.grid(row=6, column=0, columnspan=2, sticky="w")
         buttons = ttk.Frame(box)
         buttons.grid(row=7, column=0, columnspan=2, sticky="e", pady=(7, 0))
@@ -135,14 +154,14 @@ class GlobalSettings(tk.Toplevel):
         fields = [("name", "显示名称"), ("ssh_alias", "SSH别名（用户.ssh/config）"), ("python", "远程Python路径"),
                   ("project", "项目目录（可选，绝对路径）"), ("scripts", "脚本名/通配符（默认另识别tmux/日志）"), ("stalled_minutes", "无进展提醒（分钟）")]
         for row, (key, label) in enumerate(fields):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            ThemeLabel(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
             values[key] = tk.StringVar(value=str(getattr(server, key)))  # 仅编辑本次表单，不直接改活动服务配置。
             ttk.Entry(form, textvariable=values[key], width=42).grid(row=row, column=1, sticky="ew", pady=4)
         pinned = tk.BooleanVar(value=server.pinned)
         pin_check = ttk.Checkbutton(form, text="固定到顶部标签（点击即保存）", variable=pinned, style="Watcher.TCheckbutton")
         pin_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Label(form, text="已有服务器的固定选项点击立即保存；新服务器先保存连接。\n固定、收起不停止监控；SSH连接修改仍需点击“保存连接”，下次启动生效。\n使用已有SSH密钥和已核验主机；首次连接先确认SSH可用。", wraplength=570).grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
-        reason = ttk.Label(form, foreground="#b42318", wraplength=570)
+        ThemeLabel(form, text="已有服务器的固定选项点击立即保存；新服务器先保存连接。\n固定、收起不停止监控；SSH连接修改仍需点击“保存连接”，下次启动生效。\n使用已有SSH密钥和已核验主机；首次连接先确认SSH可用。", wraplength=570).grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
+        reason = ThemeLabel(form, foreground="#b42318", wraplength=570)
         reason.grid(row=8, column=0, columnspan=2, sticky="w")
         def pin_changed():
             current = next((item for item in self.app.servers if item.id == server.id), None)

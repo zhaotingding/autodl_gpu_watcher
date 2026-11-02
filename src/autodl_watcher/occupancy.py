@@ -64,6 +64,7 @@ class OccupancyObserver:
                         entry_name,
                         expected_idle=expected_idle,
                         expected_total=expected_total,
+                        refresh_hosts=False,  # 主循环已经采过该轮主机列表；此前每入口重复请求且丢弃返回值。
                         expected_gpu_indices=_fresh_gpu_indices(
                             selected_gpu_samples, datetime.now(), self.config.monitor.stale_after_seconds),
                     )

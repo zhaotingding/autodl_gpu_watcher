@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tkinter as tk
+from .theme import Label as ThemeLabel  # 状态文字随深浅主题保持可读。
 from tkinter import filedialog, ttk
 import uuid
 
@@ -146,18 +147,18 @@ class IconSettings(ttk.Frame):
     def __init__(self, parent, manager):
         super().__init__(parent)
         self.manager = manager
-        ttk.Label(self, text="选择ICO或PNG，保存后立即设置窗口图标，下次启动自动恢复。", wraplength=590).pack(anchor="w", padx=12, pady=12)
+        ThemeLabel(self, text="选择ICO或PNG，保存后立即设置窗口图标，下次启动自动恢复。", wraplength=590).pack(anchor="w", padx=12, pady=12)
         bar = ttk.Frame(self)
         bar.pack(fill="x", padx=12)
         ttk.Button(bar, text="选择并应用图标", command=self.choose).pack(side="left")
         ttk.Button(bar, text="恢复默认", command=self.reset).pack(side="left", padx=6)
         ttk.Button(bar, text="另存启动快捷方式", command=self.shortcut).pack(side="right")
-        self.description = ttk.Label(self, wraplength=600)
+        self.description = ThemeLabel(self, wraplength=600)
         self.description.pack(fill="x", padx=12, pady=10)
         self.preview = ttk.Frame(self)
         self.preview.pack(fill="x", padx=12, pady=6)
-        ttk.Label(self, text="上方预览不代表Windows最终显示效果。\n窗口标题栏和运行中任务栏使用窗口图标；已固定的旧入口可能仍使用旧图标。\n从轻量启动器打开时，磁盘EXE图标在安全关闭后同步；源码直启仅更新窗口图标。\n快捷方式使用当前图标，更换后请重新导出；固定旧入口需重新固定新快捷方式。", wraplength=600).pack(fill="x", padx=12, pady=10)
-        self.status = ttk.Label(self, wraplength=600)
+        ThemeLabel(self, text="上方预览不代表Windows最终显示效果。\n窗口标题栏和运行中任务栏使用窗口图标；已固定的旧入口可能仍使用旧图标。\n从轻量启动器打开时，磁盘EXE图标在安全关闭后同步；源码直启仅更新窗口图标。\n快捷方式使用当前图标，更换后请重新导出；固定旧入口需重新固定新快捷方式。", wraplength=600).pack(fill="x", padx=12, pady=10)
+        self.status = ThemeLabel(self, wraplength=600)
         self.status.pack(fill="x", padx=12, pady=6)
         self.render()
 
@@ -171,7 +172,7 @@ class IconSettings(ttk.Frame):
                 continue
             image = ImageTk.PhotoImage(frame, master=self)
             self.previews.append(image)
-            label = ttk.Label(self.preview, image=image, text=f"{frame.width}×{frame.height}", compound="top")
+            label = ThemeLabel(self.preview, image=image, text=f"{frame.width}×{frame.height}", compound="top")
             label.pack(side="left", padx=5)
 
     def choose(self):

@@ -18,6 +18,7 @@ from ..network_activity import observe_playwright
 
 
 _MACHINE_PATTERN = re.compile(r"^autodl-(\d+)-\d+$", re.IGNORECASE)  # 匹配 autodl-202-2 → 提取 202（物理主机号）
+_MONITOR_BLOCKED_URLS = ("*://hm.baidu.com/*",)  # 截图已确认的统计访问，不涉及平台API、脚本或登录服务。
 
 
 class PlatformAuthenticationError(RuntimeError):  # 已得到明确认证失败证据：登录页、HTTP 401/403 等。
@@ -185,6 +186,7 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
         self._authorization: str | None = None        # 内存中的 API 令牌
         self._machine_list_payload: dict[str, Any] | None = None
         self._instance_tenant_uuid: str | None = None  # 仅在本次浏览器会话内缓存实例列表页面的租户标识。
+        self._page_filters = {}  # 每页保留一个本地CDP会话，关闭页面时释放引用。
 
     def start(self) -> None:  # 启动（或复用）Playwright 浏览器实例。
         if self._context is not None:  # 复用同一持久化会话，不为每次采样重新启动浏览器。
@@ -219,6 +221,9 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
             self._playwright = playwright
             self._context = context
             self._page = context.pages[0] if context.pages else context.new_page()
+            for page in context.pages:
+                self._filter_monitor_page(page)
+            context.on("page", self._filter_monitor_page)  # 实例查询临时页也使用同一窄范围过滤。
             context.on("request", self._capture_platform_request)  # v0.5.2：请求一发出就捕获 Authorization 与 machine/list 请求体。 即使页面响应很慢、expect_response 超时，后续也能直接走 API 重试， 不必每 10 秒整页 reload，更不会仅凭超时就误判“登录失效”。
             browser_name = ("chrome" if self.config.browser_channel == "chrome" else "msedge") + (".exe" if os.name == "nt" else "")
             context.on("response", lambda response: observe_playwright(response, browser_process_name=browser_name))  # 按实际浏览器收窄候选，不新增请求。
@@ -239,7 +244,26 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
             self._authorization = None
             self._machine_list_payload = None
             self._instance_tenant_uuid = None
+            self._page_filters.clear()
             raise
+
+    def _filter_monitor_page(self, page):
+        if page in self._page_filters:
+            return
+        session = None
+        try:
+            session = self._context.new_cdp_session(page)
+            session.send("Network.enable")
+            session.send("Network.setBlockedURLs", {"urls": list(_MONITOR_BLOCKED_URLS)})
+            self._page_filters[page] = session  # 不用route拦截，保留浏览器HTTP缓存；也不新建远端连接。
+            page.on("close", lambda *_: self._page_filters.pop(page, None))
+        except PlaywrightError:
+            if session is not None:
+                try:
+                    session.detach()
+                except PlaywrightError:
+                    pass
+            print("浏览器统计请求过滤未启用；平台采集继续，连接详情仍按实际观测显示。", flush=True)
 
     def close(self) -> None:  # 关闭浏览器并释放所有资源。
         context = self._context
@@ -250,6 +274,7 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
         self._authorization = None
         self._machine_list_payload = None
         self._instance_tenant_uuid = None
+        self._page_filters.clear()
         if context is not None:
             try:
                 context.close()
@@ -615,8 +640,10 @@ class PlatformBrowserCollector:  # AutoDL 平台数据采集器 — 通过 Playw
         expected_idle: int | None = None,
         expected_total: int | None = None,
         expected_gpu_indices: set[int] | None = None,
+        refresh_hosts: bool = True,
     ) -> list[OccupancyRecord]:  # 读取一个入口的“占用详情”，并做入口身份及空位一致性校验。
-        self.collect()
+        if refresh_hosts or self._page is None:
+            self.collect()  # 独立调用仍先初始化；正常采样复用该轮已成功取得的主机列表。
         assert self._page is not None
 
         try:  # 先尽力关掉上轮异常残留的弹窗。即使未关干净，后续 machine_name 校验 也会阻止读取旧入口。

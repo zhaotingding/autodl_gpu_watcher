@@ -5,6 +5,7 @@ from datetime import datetime
 import queue
 import threading
 import tkinter as tk
+from .theme import Label as ThemeLabel  # 状态文字随深浅主题保持可读。
 from tkinter import ttk
 
 from .network_attribution import is_loopback
@@ -83,18 +84,18 @@ class NetworkPanel(tk.Toplevel):
         body.pack(fill="both", expand=True)
         bar = ttk.Frame(body)
         bar.pack(fill="x")
-        ttk.Label(bar, text="网络连接详情", font=("Microsoft YaHei UI", 13, "bold")).pack(side="left")
+        ThemeLabel(bar, text="网络连接详情", font=("Microsoft YaHei UI", 13, "bold")).pack(side="left")
         self.refresh_button = ttk.Button(bar, text="立即刷新", command=self.refresh)
         self.refresh_button.pack(side="right")
         ttk.Checkbutton(bar, text="每3秒自动刷新", variable=self.automatic,
                         style="Watcher.TCheckbutton", command=self._automatic_changed).pack(side="right", padx=8)
-        ttk.Label(body, textvariable=self.summary).pack(anchor="w", pady=(7, 4))
+        ThemeLabel(body, textvariable=self.summary).pack(anchor="w", pady=(7, 4))
         controls = ttk.Frame(body)
         controls.pack(fill="x", pady=(0, 7))
         for label, value in (("当前记录", "current"), ("未再观察到", "closed"), ("全部", "all")):
             ttk.Radiobutton(controls, text=label, value=value, variable=self.view,
                             command=self._render).pack(side="left", padx=(0, 10))
-        ttk.Label(controls, text="筛选：").pack(side="left", padx=(10, 0))
+        ThemeLabel(controls, text="筛选：").pack(side="left", padx=(10, 0))
         ttk.Entry(controls, textvariable=self.filter_text).pack(side="left", fill="x", expand=True)
         services = ttk.LabelFrame(body, text="服务网址与请求观测（逐连接对应关系见下表）", padding=4)
         services.pack(fill="x", pady=(0, 6))
@@ -135,9 +136,9 @@ class NetworkPanel(tk.Toplevel):
         detail_scroll = ttk.Scrollbar(details, orient="vertical", command=self.detail.yview)
         detail_scroll.pack(side="right", fill="y")
         self.detail.configure(yscrollcommand=detail_scroll.set)
-        self.status_label = ttk.Label(body, textvariable=self.status, foreground="#8a5b11", wraplength=1120)
+        self.status_label = ThemeLabel(body, textvariable=self.status, foreground="#8a5b11", wraplength=1120)
         self.status_label.pack(anchor="w", pady=(2, 4))
-        notes = ttk.Label(body, text="连接数不是请求数：HTTP可复用连接，本机回环也显示TCP。请求网址按观测关联；候选和未核对会明确标注，不靠443端口或IP猜协议。", wraplength=1320)
+        notes = ThemeLabel(body, text="连接数不是请求数：HTTP可复用连接，本机回环也显示TCP。请求网址按观测关联；候选和未核对会明确标注，不靠443端口或IP猜协议。", wraplength=1320)
         notes.pack(anchor="w")
         body.bind("<Configure>", lambda event: (notes.configure(wraplength=max(400, event.width - 10)),
             self.status_label.configure(wraplength=max(400, event.width - 10))))

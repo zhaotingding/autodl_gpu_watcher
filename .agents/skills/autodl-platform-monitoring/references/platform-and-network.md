@@ -25,6 +25,12 @@
 
 ## 登录与请求生命周期
 
+1.0.3（2026-11-02）网络精简：截图确认监控浏览器发出`hm.baidu.com/hm.gif`统计请求；只在专用监控页通过CDP阻止该域名，新建实例查询页同样适用。保留浏览器页面、脚本及占用弹窗；未核对网址的TCP不能据此判断可删。过滤失败必须明示，不能声称已阻止。普通人工登录Edge不受此设置影响。
+
+用`Network.setBlockedURLs`而非`context.route`，因为Playwright路由会关闭HTTP缓存。每页持有一个CDP会话，页面/上下文结束后释放；不新增远端请求或全局代理规则。真实127.0.0.1 Edge网页验收：两页API各请求一次、统计请求零到达、CSS只下载一次；这是本机机制验证，不能宣称真实AutoDL连接数已降低到固定数量。参考[Playwright路由缓存说明](https://playwright.dev/python/docs/api/class-browsercontext#browser-context-route)，本轮测试`test_browser_network.py`。
+
+同一轮主循环先取得主机列表，`OccupancyCoordinator`传`refresh_hosts=False`复用该轮列表；原来`collect_occupancy`每入口额外`collect()`且丢弃返回值。独立调用仍默认刷新，逐入口点击及身份/空位/索引校验保留，电源操作前的独立复核不能随之删掉。
+
 - 登录页、401/403或明确业务登录超时才证明会话失效；HTTP200也可能携带登录超时。未知错误、超时、429与5xx不能统一判为登录过期。
 - 同步登录资料后须真实接口核验，只证明检查时刻有效。GUI管道失败也要处理自有worker退出；旧后台未结束前不并发使用同一browser profile。
 - `Network.getResponseBody: No resource with given identifier found`是响应体丢失；捕获请求上下文后用新API响应恢复，有限重试只读查询，不重发电源POST。

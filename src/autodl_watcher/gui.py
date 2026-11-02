@@ -13,11 +13,13 @@ import threading
 import uuid
 import weakref
 import tkinter as tk
+from .theme import Label as ThemeLabel  # 状态文字随深浅主题保持可读。
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
 from .network_activity import NETWORK_PREFIX, emit_observation, set_observer
+from .theme import ThemeManager
 from .launcher import child_environment, project_python as worker_python
 from .app_icon import IconManager
 from .cli import normalize_host, positive_seconds
@@ -144,11 +146,14 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
             except (ValueError, OSError, AttributeError):
                 self.status.set("本地偏好读取失败，已使用默认配置")
         self.icons = IconManager(root, self.local)
+        self.theme = ThemeManager(root, preferences)  # 个人YAML决定外观，首次无配置默认深色。
         self.settings_window = None
         self.network_window = self.network_monitor = None  # 连接详情按需创建，主窗口启动不增加系统轮询。
         self.training.ai.open_settings = self.open_settings
         self.icons.open_settings = self.open_settings
         self._build()
+        self.log._theme_role = "output"
+        self.theme.apply()  # clam和业务控件创建后统一配色，后开的窗口自动继承。
         self._populate([(item.machine_name, "待刷新", "未核验")
                         for item in self.config.auto_start.targets if item.enabled])
         self.root.after(100, self._drain)  # 将首次消息处理排入 Tk 事件队列，而不是阻塞等待后台输出。
@@ -181,6 +186,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
                 for x, y in ((4, 8), (5, 9), (6, 10), (7, 11), (8, 10), (9, 9), (10, 8), (11, 7), (12, 6), (12, 5)):
                     indicator.put("#245cc4", to=(x, y, x + 2, y + 2))  # 画✓，替换clam主题默认的X。
             self.check_images.append(indicator)
+        self.root._watcher_check_images = self.check_images
         style.element_create("Watcher.indicator", "image", self.check_images[0], ("selected", self.check_images[1]))
         style.layout("Watcher.TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
             ("Watcher.indicator", {"side": "left", "sticky": ""}),
@@ -199,7 +205,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.auto_page = ttk.Frame(self.notebook, padding=6)
         self.notebook.add(self.auto_page, text="AutoDL 平台")
         page = self.auto_page
-        ttk.Label(page, textvariable=self.title_text, style="Title.TLabel").pack(anchor="w")
+        ThemeLabel(page, textvariable=self.title_text, style="Title.TLabel").pack(anchor="w")
         toolbar = ttk.Frame(page)
         toolbar.pack(fill="x", pady=4)
         self.refresh_button = ttk.Button(toolbar, text="刷新服务器", command=self.refresh)
@@ -208,7 +214,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.login_button.pack(side="left", padx=5)
         self.login_done = ttk.Button(toolbar, text="完成登录并关闭窗口", command=self.finish_login, state="disabled")
         self.login_done.pack(side="left")
-        self.session_label = ttk.Label(page, textvariable=self.session_text, foreground="#7a5a18", wraplength=920)
+        self.session_label = ThemeLabel(page, textvariable=self.session_text, foreground="#7a5a18", wraplength=920)
         self.session_label.pack(anchor="w", pady=(0, 4))
         page.bind("<Configure>", lambda event: self.session_label.configure(wraplength=max(200, event.width - 20)))
         self.resource_split = ttk.Panedwindow(page, orient="vertical")
@@ -221,7 +227,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(controls, text="停止GPU监控", command=self.stop, state="disabled", width=12)
         self.stop_button.pack(side="left", padx=4)
-        ttk.Label(controls, text="平台/GPU同启停；SSH页独立", foreground="#667085").pack(side="left", padx=8)
+        ThemeLabel(controls, text="平台/GPU同启停；SSH页独立", foreground="#667085").pack(side="left", padx=8)
         body = ttk.Frame(resource_area)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
@@ -245,7 +251,7 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
         horizontal = ttk.Scrollbar(body, orient="horizontal", command=self.table.xview)
         horizontal.grid(row=1, column=0, sticky="ew")
         self.table.configure(yscrollcommand=scroll.set, xscrollcommand=horizontal.set)
-        self.status_label = ttk.Label(resource_area, textvariable=self.status, foreground="#245cc4", wraplength=930)
+        self.status_label = ThemeLabel(resource_area, textvariable=self.status, foreground="#245cc4", wraplength=930)
         self.status_label.pack(anchor="w", fill="x", pady=4)
         resource_area.bind("<Configure>", lambda event: self.status_label.configure(wraplength=max(200, event.width - 10)))
         window_ref = weakref.ref(self)
@@ -290,11 +296,11 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
     def _show_training_tab(self, server):
         if server.id not in self.external_panes:
             page = ttk.Frame(self.notebook, padding=10)
-            title = ttk.Label(page, text=server.name, style="Title.TLabel")
+            title = ThemeLabel(page, text=server.name, style="Title.TLabel")
             title.pack(anchor="w")
             options = ttk.Frame(page)
             options.pack(fill="x", pady=4)
-            ttk.Label(options, text="采样间隔（秒）").pack(side="left")
+            ThemeLabel(options, text="采样间隔（秒）").pack(side="left")
             interval = tk.StringVar(value="60")
             ttk.Entry(options, textvariable=interval, width=9).pack(side="left", padx=5)
             ttk.Button(options, text="收起页面（不停止监控）", command=lambda key=server.id: self.hide_training(key)).pack(side="right")

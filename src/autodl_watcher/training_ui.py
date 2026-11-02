@@ -4,10 +4,12 @@ from datetime import datetime
 import time
 import unicodedata
 import tkinter as tk
+from .theme import Label as ThemeLabel  # 状态文字随深浅主题保持可读。
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .cli import positive_seconds  # 与 CLI 共用间隔校验，视图无需导入监控入口。
+from .theme import palette, color as theme_color, card_colors
 
 
 COLORS = {"success": ("#10372a", "#8bf0ad"), "error": ("#481f26", "#ff9ca8"),
@@ -99,25 +101,30 @@ class TrainingPane(ttk.Frame):
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(bar, text="停止", command=self.stop)
         self.stop_button.pack(side="left", padx=4)
-        self.summary = ttk.Label(self, text="尚未配置训练连接", wraplength=560)
+        self.summary = ThemeLabel(self, text="尚未配置训练连接", wraplength=560)
         self.summary.pack(fill="x", pady=(0, 5))
+        self.split = ttk.Panedwindow(self, orient="vertical")
+        self.split.pack(fill="both", expand=True)  # 每个服务器共用可拖动分区，不另建采集链。
         if show_gpus:
-            output = ttk.Frame(self)
-            output.pack(fill="x", pady=(0, 5))
+            output = ttk.Frame(self.split)
+            self.split.add(output, weight=2)
             horizontal = ttk.Scrollbar(output, orient="horizontal")
             horizontal.pack(side="bottom", fill="x")
-            self.gpu_log = ScrolledText(output, height=5, width=1, wrap="none", state="disabled", font=("Consolas", 9),
-                                       background="#0e151d", foreground="#8bf0ad", xscrollcommand=horizontal.set, padx=5, pady=3)
-            self.gpu_log.pack(fill="x")
+            self.gpu_log = ScrolledText(output, height=12, width=1, wrap="none", state="disabled", font=("Consolas", 9),
+                                       background=palette(self)["terminal"], foreground=palette(self)["terminal_fg"], xscrollcommand=horizontal.set, padx=5, pady=3)
+            self.gpu_log._theme_role = "terminal"
+            self.gpu_log.pack(fill="both", expand=True)
             horizontal.configure(command=self.gpu_log.xview)
             self.gpu_log.tag_configure("error", foreground="#ff9ca8")
             self.gpu_log.tag_configure("warning", foreground="#ffe09a")
-        self.canvas = tk.Canvas(self, background="#17202e", highlightthickness=0, width=300, height=180)
-        scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        cards_area = ttk.Frame(self.split)
+        self.split.add(cards_area, weight=3)
+        self.canvas = tk.Canvas(cards_area, background=palette(self)["bg"], highlightthickness=0, width=300, height=180)
+        scroll = ttk.Scrollbar(cards_area, orient="vertical", command=self.canvas.yview)
         scroll.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.configure(yscrollcommand=scroll.set)
-        self.content = tk.Frame(self.canvas, background="#17202e")
+        self.content = tk.Frame(self.canvas, background=palette(self)["bg"])
         self.content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", lambda event: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", self._resize)
@@ -227,14 +234,12 @@ class TrainingPane(ttk.Frame):
             gpu = ",".join(f"#{index}" for index in card.get("gpu_indices", [])) or "待确认"
             self._label(frame, f"PID {card['pid']} · 用户 {card.get('user', '—')} · GPU {gpu} · {task_memory(card)}"
                         + (" · 上次采样" if warning or not state["active"] else ""))
-            self._label(frame, process_time(card))
-            if card.get("tmux_session"):
-                self._label(frame, f"tmux：{card['tmux_session']}")
-            self._label(frame, card.get("rule_status", "默认监控"), color=COLORS["warning"][1] if "不适用" in card.get("rule_status", "") else "#c0d6cd")
+            self._label(frame, process_time(card) + (f" · tmux：{card['tmux_session']}" if card.get("tmux_session") else ""))
             progress = card["progress"]
             epoch, total = progress.get("epoch"), progress.get("total_epochs")
             raw = f" · 日志Epoch {progress['raw_epoch']}" if progress.get("raw_epoch") is not None else ""
-            self._label(frame, f"轮次 {epoch if epoch is not None else '—'}/{total if total is not None else '—'}{raw} · 全局Step {progress.get('step') if progress.get('step') is not None else '—'}" + (f"/{progress['total_steps']}" if progress.get('total_steps') else ""))
+            self._label(frame, f"轮次 {epoch if epoch is not None else '—'}/{total if total is not None else '—'}{raw} · 全局Step {progress.get('step') if progress.get('step') is not None else '—'}" + (f"/{progress['total_steps']}" if progress.get('total_steps') else "")
+                        + " · " + card.get("rule_status", "默认监控"), color=COLORS["warning"][1] if "不适用" in card.get("rule_status", "") else "#c0d6cd")
             if epoch is not None and total and total > 0:
                 ttk.Progressbar(frame, maximum=total, value=total if progress.get("completed") else min(total, max(0, epoch - 1)), style="Error.Horizontal.TProgressbar" if level == "error" else "Memory.Horizontal.TProgressbar").pack(fill="x", padx=8, pady=3)  # 条形仅表示此前已完成轮次，不猜当前轮内进度。
             train = progress.get("train", {})
@@ -247,7 +252,7 @@ class TrainingPane(ttk.Frame):
                 self._label(frame, "原文摘要（未解释）：\n" + card.get("preview", "没有可读输出"))
             if progress.get("error"):
                 self._label(frame, progress["error"], color=COLORS["error"][1])
-            actions = ttk.Frame(frame)
+            actions = ttk.Frame(frame, style=f"Card.{level}.TFrame")
             actions.pack(anchor="e", padx=8, pady=(2, 6))
             ttk.Button(actions, text="训练原日志", command=lambda item=card: self.details(item)).pack(side="right")
             if getattr(self.service, "ai", None):
@@ -257,22 +262,24 @@ class TrainingPane(ttk.Frame):
         self.canvas.yview_moveto(position)
 
     def _card(self, level):
-        frame = tk.Frame(self.content, background=COLORS[level][0], highlightbackground=COLORS[level][1], highlightthickness=1)
-        frame.pack(fill="x", padx=6, pady=5)
+        background, border = card_colors(self, level)
+        frame = tk.Frame(self.content, background=background, highlightbackground=border, highlightthickness=1)
+        frame._theme_card = level  # 已打开的卡片在主题切换时保留状态色。
+        frame.pack(fill="x", padx=6, pady=4)
         return frame
 
     def _label(self, frame, text, bold=False, color="#eef2f6"):
-        label = tk.Label(frame, text=text, background=frame.cget("background"), foreground=color, anchor="w", justify="left",
+        label = tk.Label(frame, text=text, background=frame.cget("background"), foreground=theme_color(self, color), anchor="w", justify="left",
                  wraplength=max(160, self.canvas.winfo_width() - 32), font=("Microsoft YaHei UI", 9, "bold" if bold else "normal"))
-        label.pack(fill="x", padx=8, pady=2)
+        label.pack(fill="x", padx=8, pady=1)  # 压缩垂直留白，长指标仍按当前窗口宽度换行。
         label.bind("<MouseWheel>", lambda event: self.canvas.yview_scroll(-int(event.delta / 120), "units"))
 
     def details(self, card):
         window = tk.Toplevel(self)
         window.title(f"{card['name']} · PID {card['pid']} · 训练原日志")
         window.geometry("780x440")
-        ttk.Label(window, text=card.get("log_path") or "未找到训练日志", wraplength=740).pack(anchor="w", padx=8, pady=4)
-        ttk.Label(window, text=card.get("details_note") or "最近采样的原文片段；长日志显示末尾64 KiB，可横向滚动。", wraplength=740).pack(anchor="w", padx=8)
+        ThemeLabel(window, text=card.get("log_path") or "未找到训练日志", wraplength=740).pack(anchor="w", padx=8, pady=4)
+        ThemeLabel(window, text=card.get("details_note") or "最近采样的原文片段；长日志显示末尾64 KiB，可横向滚动。", wraplength=740).pack(anchor="w", padx=8)
         horizontal = ttk.Scrollbar(window, orient="horizontal")
         horizontal.pack(side="bottom", fill="x")
         text = ScrolledText(window, wrap="none", font=("Consolas", 10), xscrollcommand=horizontal.set)

@@ -11,6 +11,7 @@
 | 专用规则、AI设置/请求、Token费用和退出记账 | [autodl-ai-rules](.agents/skills/autodl-ai-rules/SKILL.md) |
 | 独立 Conda 环境、源码/轻量 EXE 启动、同环境 worker 与图标 | [autodl-windows-build](.agents/skills/autodl-windows-build/SKILL.md) |
 | 本机网络连接详情、进程归属、系统表采集及观察历史 | [autodl-network-observability](.agents/skills/autodl-network-observability/SKILL.md) |
+| 深浅主题、外观YAML、Tk控件配色和窗口切换适配 | [autodl-ui-theme](.agents/skills/autodl-ui-theme/SKILL.md) |
 | 配置兼容、资料根、个人数据迁移/恢复和历史证据定位 | [autodl-maintenance](.agents/skills/autodl-maintenance/SKILL.md) |
 
 按当前任务选读匹配技能；索引不要求全部读取，也没有统一必读总技能。仅在当前步骤需要时读对应references。长期知识按相同触发条件更新或按独立用途拆分，不重建旧笔记入口。
