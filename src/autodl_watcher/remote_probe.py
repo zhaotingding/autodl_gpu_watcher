@@ -234,6 +234,12 @@ def public_gpu_processes(gpus, apps, container, boot_time, ticks):  # 其他用�
                 row.update(user=pwd.getpwuid(uid).pw_name, own=uid == os.getuid(), start_ticks=int(before))
                 args = (path / "cmdline").read_bytes()[:16384].decode("utf-8", "replace").split("\0")
                 row["process"] = next((Path(arg).name for arg in args if arg.endswith(".py")), row["process"])
+                if row["own"] and Path(python_entry(args)).name == "早停基线.py":  # 仅本人PRD公共入口使用实验显示名。
+                    run_ids = [value for arg, value in zip(args, args[1:]) if arg == "--run-id"]
+                    if len(run_ids) == 1:
+                        match = re.fullmatch(r"4090-([\w＋（）-]{1,64})-源验证早停-[0-9]{8}-种子[0-9]{1,10}", run_ids[0])
+                        if match:
+                            row["process"] = match[1]  # 只显示受限的方案名，原GPU进程名及识别字段保留。
                 for index, arg in enumerate(args):
                     if arg in {"--task_target", "--detector_path", "--config"} and index + 1 < len(args):
                         row["config"] = Path(args[index + 1]).name  # 不展示其他命令行参数，避免泄露令牌。

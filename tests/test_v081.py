@@ -85,6 +85,31 @@ class Version081Test(unittest.TestCase):
             self.assertNotIn("PRIVATE-VALUE", json.dumps(row))
             self.assertNotIn("logs", row)
 
+    def test_prd_experiment_display_uses_only_own_valid_run_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            process = folder / "123"
+            process.mkdir()
+            (process / "stat").write_text("123 (python) " + " ".join(["R", "1"] + ["0"] * 17 + ["100", "0"]))
+            def path(value):
+                return folder if str(value) == "/proc" else Path(value)
+            apps = [dict(uuid="gpu", pid=123, memory_used=7000, process_name="python")]
+            uid = process.stat().st_uid
+            cases = [
+                (uid, "4090-降采样超分重构-源验证早停-20261109-种子3407", "降采样超分重构"),
+                (uid, "4090-VQGAN单位方向残差-源验证早停-20261109-种子3407", "VQGAN单位方向残差"),
+                (uid + 1, "4090-降采样超分重构-源验证早停-20261109-种子3407", "早停基线.py"),
+                (uid, "4090-/private/value-源验证早停-20261109-种子3407", "早停基线.py"),
+            ]
+            for viewer_uid, run_id, expected in cases:
+                with self.subTest(viewer_uid=viewer_uid, expected=expected):
+                    args = ["python", "-u", "/project/早停基线.py", "run", "--run-id", run_id]
+                    (process / "cmdline").write_bytes(("\0".join(args) + "\0").encode("utf-8"))
+                    with patch.object(remote_probe, "Path", side_effect=path), patch.object(remote_probe.os, "getuid", return_value=viewer_uid, create=True), patch.object(remote_probe, "pwd", SimpleNamespace(getpwuid=lambda uid: SimpleNamespace(pw_name="user")), create=True):
+                        row = remote_probe.public_gpu_processes([dict(uuid="gpu", index=0)], apps, False, 9000, 100)[0]
+                    self.assertEqual((row["process"], row["process_name"], row["pid"], row["started_at"]), (expected, "python", 123, 9001))
+                    self.assertNotIn(run_id, json.dumps(row, ensure_ascii=False))
+
     def test_missing_process_memory_is_unknown_not_zero(self):
         with patch.object(remote_probe.subprocess, "run", side_effect=[SimpleNamespace(returncode=0, stdout="0,gpu,GPU,80,1000,32000,60"), SimpleNamespace(returncode=0, stdout="gpu,123,python,N/A")]):
             _, apps, _ = remote_probe.query_gpu()
