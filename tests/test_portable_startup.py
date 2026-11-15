@@ -70,7 +70,7 @@ class PortableStartupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch("builtins.__import__", side_effect=without_tk), \
                  patch.object(launcher, "check_environment", return_value={}), \
-                 patch.object(sys, "argv", ["autodl-watcher"]), \
+                 patch.object(sys, "argv", ["autodl-watcher", "--legacy-tk"]), \
                  patch.object(launcher.ctypes, "windll", create=True) as windows:
                 with self.assertRaises(SystemExit) as exc:
                     launcher.gui_main(root=Path(directory))

@@ -5,7 +5,7 @@
 - **AutoDL 监控**：查看平台资源及实例状态；自动开机需要另行配置并明确开启。
 - **AI 专用规则**：可选地分析日志并生成解析规则；日常采样在本地执行规则，不必每轮调用 AI。
 
-本项目面向开发者，使用 **源码 + 一个独立 Conda 环境 `auto-gpu`**。EXE 是可选启动入口，不是免安装的完整应用。
+本项目面向开发者，使用 **Electron 界面 + Python 后台 + 独立 Conda 环境 `auto-gpu`**。源码和可选轻量 EXE 共用同一启动链。
 
 [首次安装](#首次安装) · [日常启动](#日常启动) · [首次使用](#首次使用) · [更新项目](#更新项目) · [恢复个人设置](#恢复个人设置) · [手动验收](#手动验收) · [常见问题](#常见问题) · [更多文档](#更多文档)
 
@@ -23,6 +23,7 @@
 | 工具 | 什么时候需要 |
 | --- | --- |
 | Conda（Anaconda 或 Miniconda） | 必需；用于创建项目 Python 环境 |
+| Node.js 22.12 及以上与 npm | 安装仓库内 `desktop/` 的 Electron 运行时 |
 | Git | 克隆仓库、更新源码和参与协作时需要 |
 | Microsoft Edge | 使用 AutoDL 平台登录时需要 |
 | Windows OpenSSH 客户端及自己的 SSH 密钥 | 使用训练监控时需要 |
@@ -32,8 +33,10 @@
 ```powershell
 conda --version
 git --version
+node --version
+npm.cmd --version
 ```
-两条都应输出版本号。如果提示找不到 `conda`，先看[常见问题](#常见问题)，不要继续运行安装命令。
+以上命令应输出版本号。Node.js 需达到 22.12。如果提示找不到 `conda`，先看[常见问题](#常见问题)。
 
 
 没有源码时，在自己可写的开发目录中、用普通 PowerShell 克隆：
@@ -85,6 +88,15 @@ $LASTEXITCODE
 应为 `0`。**不能仅凭中间出现 `Successfully built` 判断安装成功**，后面的安装或卸载环节仍可能报错。出现 `WinError 5 / 拒绝访问` 时，按下方排错步骤处理，不要加 `--user`。
 
 ### 4. 检查安装是否可用
+
+先在仓库根目录安装界面依赖。普通 PowerShell 执行，项目目录须可写，首次需要下载锁定的 Electron。
+
+```powershell
+npm.cmd ci --prefix desktop
+npm.cmd run setup-runtime --prefix desktop
+```
+
+退出码应为 `0`，并生成 `desktop/node_modules/electron/dist/electron.exe`。Python 依赖由 `pyproject.toml` 声明，界面依赖与精确版本由 `desktop/package.json` 和 `desktop/package-lock.json` 声明。
 **窗口权限：普通 PowerShell。** 仍在仓库目录执行；每条成功后再执行下一条：
 ```powershell
 conda run -n auto-gpu --no-capture-output python -s -m pip check
@@ -107,7 +119,13 @@ conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher --version
 ```powershell
 conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher
 ```
-看到“Auto算力与训练调度”窗口即表示界面已启动；这还不代表平台登录、SSH 连接或监控任务已经成功。
+默认打开 Electron 窗口，显示平台资源、服务器训练页、网络详情和设置。窗口的后台状态反馈 Python 服务是否就绪，连接与采集结果在相应页面查看。
+
+旧 Tk 界面保留显式兼容入口，便于核对迁移前后的行为。
+
+```powershell
+conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher --legacy-tk
+```
 ### 双击主程序 EXE
 
 启动器默认选 `auto-gpu`，不继承终端里碰巧激活的其他项目环境。双击还要求 Windows 能通过 `CONDA_EXE` 或 `PATH` 找到所选 Conda 管理器；仅在某个终端里运行过 `conda activate`，不能证明资源管理器也找得到它。
@@ -127,7 +145,7 @@ conda run -n auto-gpu --no-capture-output .\AutoDLWatcher.exe
 
 第一次打开、尚未配置服务器时，列表为空或显示“尚未配置”是正常现象。无需复制维护者的个人设置。
 
-1.0.3 默认使用深色界面。在“全局设置”顶部选择深色/浅色，选择后立即保存到 `.ui/preferences.yaml` 的 `ui.theme`，当前及以后打开的应用窗口一起适配；下次启动恢复选择。此文件里的其它个人设置会保留。
+界面默认深色，可在全局设置切换浅色。偏好继续合并保存到 `.ui/preferences.yaml` 的 `ui.theme`，重开恢复。Electron 后台继续读取原有服务器、规则、账本、登录资料和 Windows 凭据。
 
 右上角“全局设置”旁的“网络连接详情”统一查看本实例各服务器监控及子进程的 TCP/UDP 记录，支持筛选、手动刷新和每 3 秒自动刷新。关闭详情暂停观察；不会停止训练监控。显示系统状态、进程/PID、源/目标地址和观察时间，不估算流量或请求次数。具体范围见[网络连接详情](docs/使用说明.md#6-网络连接详情)。
 
@@ -194,6 +212,7 @@ git pull --ff-only
 | --- | --- | --- |
 | 只有普通业务源码变化 | 重开应用 | 普通 PowerShell |
 | 依赖或项目安装配置变化 | 重新执行下方安装命令，再检查环境 | 需要环境写权限 |
+| `desktop/package-lock.json` 变化或首次升级 Electron 界面 | 在仓库根依次执行 `npm.cmd ci --prefix desktop` 和 `npm.cmd run setup-runtime --prefix desktop` | 项目目录写权限 |
 | 启动器实现或嵌入图标变化 | 按构建说明生成并验证新 EXE | 安装构建依赖时按环境权限；构建本身通常普通窗口即可 |
 | 移动了整个仓库目录 | 在新目录重新执行 editable 安装，使环境指向新源码 | 需要环境写权限 |
 
@@ -257,6 +276,7 @@ conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user -e 
 | `EnvironmentNotWritableError` | Conda 目标环境目录不可写 | 同样检查环境路径和窗口权限；不要安装到 base 或另建 `.venv` 绕过 |
 | 管理员窗口仍然报拒绝访问 | 可能仍有文件占用，或目录权限/安全软件另有限制 | 先确认没有使用该环境的应用，保留完整错误路径继续定位；不要反复卸载全部依赖或盲目修改整个磁盘权限 |
 | `No module named autodl_watcher` | 环境里未安装本项目，或 editable 仍指向旧目录 | 在正确仓库目录、按所需权限重新安装，再运行 `--check-environment` |
+| 缺少 Electron 运行时 | 尚未安装完整界面依赖 | 执行本页的两条 npm 安装命令，核对 Node 版本、完整输出及退出码 |
 | 找不到 `conda` | 当前 PowerShell 没有识别 Conda 命令 | 使用安装器提供的 Anaconda/Miniconda PowerShell 入口；或者找到自己的 `conda.exe`，按下方说明调用 |
 | `EnvironmentNameNotFound` | 当前 Conda 管理器找不到 `auto-gpu` | 运行 `conda env list`；若有多套 Conda，确认用的是同一套。环境确实缺失才创建 |
 | 提示当前目录不是 Python 项目、没有 `pyproject.toml` | 新开的管理员窗口没有进入仓库 | 执行 `Set-Location`，用 `Test-Path .\pyproject.toml` 确认返回 `True` |

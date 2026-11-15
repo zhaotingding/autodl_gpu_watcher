@@ -32,7 +32,7 @@ class PackageLayoutTest(unittest.TestCase):
             with patch.dict(os.environ, AUTODL_APP_ROOT=directory), \
                  patch.object(sys, "argv", ["gui_entry.py"]), \
                  patch.object(launcher, "check_environment", return_value={}), \
-                 patch("autodl_watcher.gui.main", side_effect=RuntimeError("startup-test")), \
+                 patch("autodl_watcher.electron_launcher.launch", side_effect=RuntimeError("startup-test")), \
                  patch("ctypes.windll.user32.MessageBoxW") as dialog:
                 with self.assertRaises(SystemExit) as failure:
                     entry()  # 轻量EXE必须能收到失败，不能把启动失败吞成0。
@@ -50,7 +50,7 @@ class PackageLayoutTest(unittest.TestCase):
             with patch.dict(os.environ, AUTODL_APP_ROOT=directory), \
                  patch.object(sys, "argv", ["gui_entry.py"]), \
                  patch.object(launcher, "check_environment", side_effect=RuntimeError("需要专用Conda环境")), \
-                 patch("autodl_watcher.gui.main") as gui, \
+                 patch("autodl_watcher.electron_launcher.launch") as gui, \
                  patch("ctypes.windll.user32.MessageBoxW") as dialog:
                 with self.assertRaises(SystemExit) as failure:
                     entry()

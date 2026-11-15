@@ -20,3 +20,6 @@ dist/
 
 # 本机编辑器偏好；保留文件，不纳入 Git。
 /.vscode/settings.json
+
+# Electron运行时由desktop锁文件安装，个人Chromium缓存保留在忽略目录。
+desktop/node_modules/

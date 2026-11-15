@@ -1,11 +1,11 @@
 ---
 name: autodl-ui-theme
-description: 修改本项目深浅主题、外观YAML、Tk/ttk颜色或新窗口配色时使用；不用于平台请求、训练解析或EXE图标资源。
+description: 修改本项目Electron或旧Tk界面的深浅主题、外观YAML和窗口配色时使用；不用于平台请求、训练解析或EXE图标资源。
 ---
 
 # 深浅主题与窗口配色
 
-适用1.0.3起的Tk源码界面；约定核对日期2026-11-02。
+1.1.0起默认Electron，配色由`desktop/styles.css`统一变量及renderer主题切换实现，保存仍为`.ui/preferences.yaml`的`ui.theme`。旧Tk使用下述theme.py路径，仅在显式兼容入口适用。约定核对日期2026-11-15。
 
 1. 外观共用`theme.py`，个人选择合并到`.ui/preferences.yaml`的`ui.theme`，默认dark，可选light。改保存/恢复或控件细节时读[主题实现与验证](references/theme.md)。
 2. 复用共享语义颜色和`theme.Label`，运行中的错误/成功/提醒更新也须适配；训练卡片保留状态含义。不要只在启动时换底色，也不逐个窗口复制主题实现。

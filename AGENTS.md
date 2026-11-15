@@ -12,6 +12,7 @@
 | 独立 Conda 环境、源码/轻量 EXE 启动、同环境 worker 与图标 | [autodl-windows-build](.agents/skills/autodl-windows-build/SKILL.md) |
 | 本机网络连接详情、进程归属、系统表采集及观察历史 | [autodl-network-observability](.agents/skills/autodl-network-observability/SKILL.md) |
 | 深浅主题、外观YAML、Tk控件配色和窗口切换适配 | [autodl-ui-theme](.agents/skills/autodl-ui-theme/SKILL.md) |
+| Electron界面、preload通信、Python桌面后台及桌面验收 | [autodl-electron-desktop](.agents/skills/autodl-electron-desktop/SKILL.md) |
 | 配置兼容、资料根、个人数据迁移/恢复和历史证据定位 | [autodl-maintenance](.agents/skills/autodl-maintenance/SKILL.md) |
 
 按当前任务选读匹配技能；索引不要求全部读取，也没有统一必读总技能。仅在当前步骤需要时读对应references。长期知识按相同触发条件更新或按独立用途拆分，不重建旧笔记入口。
@@ -21,7 +22,7 @@
 - 先核对实际Git根目录与已有改动。保留config.local.yaml、.ui/、runtime/、.env、系统凭据和无关用户改动；干净包不得包含个人资料。
 - 新配置默认仅监控、自动AI关闭；保留既有业务契约。具体领域约束与验证按任务读取对应技能，不在索引复制全部经验。
 - 验证默认使用临时目录和模拟平台/SSH/AI；真实训练、开关机、收费调用及远程push须有对应明确授权。
-- 运行与构建依赖统一在pyproject.toml；一项目一个独立 Conda 环境，不创建或依赖 venv/.venv，不向 base、全局 Python 或用户 site 安装。PowerShell 入口统一使用明确命名的 `conda run -n <项目环境>`；源码、CLI、轻量 EXE 与后台复用同一环境和业务链，不新增重复入口或绕过服务访问内部状态。
+- Python运行与构建依赖统一在pyproject.toml，Electron依赖使用desktop/package.json及锁文件；一项目一个独立 Conda 环境，不创建或依赖 venv/.venv，不向 base、全局 Python 或用户 site 安装。PowerShell 入口统一使用明确命名的 `conda run -n <项目环境>`；源码、CLI、轻量 EXE 与后台复用同一环境和业务链。
 - 按改动选必要验证。完整离线回归命令为 `conda run -n auto-gpu --no-capture-output python -s -m unittest discover -s tests -q`（环境名按本机专用环境一致替换）；文档迁移检查内容、引用和技能结构，无需重建EXE或重启监控。
 
 安装与协作命令见 [开发与协作](docs/开发与协作.md)，业务契约见 [重构开发规范](重构开发规范.md)。

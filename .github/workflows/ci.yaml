@@ -15,6 +15,11 @@ jobs:  # 定义需要执行的任务。
       PYTHONNOUSERSITE: '1'  # 禁用用户级 Python 包目录，避免混入项目环境外的依赖。
     steps:  # 按顺序执行；前一步失败时，默认不再执行后续步骤。
       - uses: actions/checkout@v4  # 将当前待检查的仓库源码取到云端工作目录。
+      - uses: actions/setup-node@v4  # Electron工具链使用项目要求的Node版本。
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
       - uses: conda-incubator/setup-miniconda@v4  # 准备 Miniconda 和项目独立环境。
         with:  # 传给上面这个 Action 的配置。
           activate-environment: auto-gpu  # 项目环境名称；后续安装和测试统一使用它。
@@ -33,6 +38,13 @@ jobs:  # 定义需要执行的任务。
         run: |
           $PSNativeCommandUseErrorActionPreference = $true  # 外部命令失败时交给 PowerShell 报错。
           conda run -n auto-gpu --no-capture-output python -s -m unittest discover -s tests -q  # 自动发现 tests 目录中的用例；-q 精简输出，失败仍会显示详情。
+
+      - name: Electron interface and Python bridge  # 从实际窗口验证IPC、个人设置及正常退出。
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm.cmd ci --prefix desktop
+          npm.cmd run setup-runtime --prefix desktop
+          conda run -n auto-gpu --no-capture-output node tests/electron_smoke.cjs
 
       - name: Build wheel  # 第三步：检查项目能否构建为标准 Python 安装包。
         run: |

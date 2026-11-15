@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <title>Auto算力与训练调度</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="renderer.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">A</span><div>Auto 算力<span>训练与资源调度</span></div></div>
+    <div class="nav-section">工作区</div>
+    <nav id="navigation" aria-label="主导航"></nav>
+    <div class="sidebar-bottom"><button id="network-nav" class="nav-item" type="button">网络连接详情</button><button id="settings-nav" class="nav-item" type="button">全局设置</button><div id="backend-status" class="connection-state" role="status">正在启动后台</div></div>
+  </aside>
+  <main class="workspace">
+    <header class="workspace-header"><div><div id="eyebrow" class="eyebrow">资源与训练</div><h1 id="page-title">AutoDL 平台算力</h1></div><div class="header-meta"><span id="version" class="subtle"></span><button id="theme-toggle" class="icon-button" type="button" title="切换深浅主题" aria-label="切换深浅主题">◐</button></div></header>
+    <div id="page" class="page"><div class="empty-state">正在读取本地配置和后台状态…</div></div>
+    <footer class="statusbar"><span id="global-status">等待后台就绪</span><span>Electron · Python</span></footer>
+  </main>
+  <dialog id="detail-dialog" class="detail-dialog"><div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" class="icon-button" id="dialog-close" aria-label="关闭">×</button></div><div id="dialog-content" class="dialog-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

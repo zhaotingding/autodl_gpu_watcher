@@ -101,7 +101,7 @@ def _version() -> bool:
 
 
 def gui_main(*, root: Path | None = None) -> None:
-    """延迟加载 Tk；pythonw 启动异常仍写日志并给出可操作说明。"""
+    """桌面默认启动Electron，显式兼容入口保留旧Tk界面。"""
     if "--check-environment" in sys.argv[1:]:
         try:
             print(json.dumps(check_environment(), ensure_ascii=False))
@@ -122,14 +122,19 @@ def gui_main(*, root: Path | None = None) -> None:
         with log_path.open("a", encoding="utf-8") as log:
             sys.stdout = sys.stderr = log  # GUI 的后台采样另有独立管道。
             try:
-                try:
-                    import tkinter  # noqa: F401；在导入整个界面前给出安装指导。
-                except ImportError as exc:
-                    raise RuntimeError("缺少 Tkinter：Windows 请重新安装带 Tcl/Tk 的 Python；"
-                                       "Debian/Ubuntu 请安装 python3-tk 后再启动。") from exc
                 os.environ["AUTODL_APP_ROOT"] = str(root)
-                from .gui import main
-                main()
+                arguments = sys.argv[1:]
+                if "--legacy-tk" in arguments:
+                    sys.argv.remove("--legacy-tk")
+                    try:
+                        import tkinter  # noqa: F401；旧界面明确保留独立依赖提示。
+                    except ImportError as exc:
+                        raise RuntimeError("旧界面缺少Tcl/Tk，Linux请安装python3-tk。") from exc
+                    from .gui import main
+                    main()
+                else:
+                    from .electron_launcher import launch
+                    launch(arguments)
             except Exception:
                 traceback.print_exc()
                 raise

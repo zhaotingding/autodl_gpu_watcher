@@ -10,7 +10,7 @@ description: 维护本项目独立 Conda 环境安装、源码与轻量 Windows 
 ## 主要流程
 
 1. 安装、构建或入口问题读取[Conda 安装与轻量启动器](references/packaging.md)；涉及图标转换、加载或资源修改时才读取[图标四环节](references/icons.md)。
-2. `pyproject.toml` 是唯一依赖声明，源码 `__version__` 是版本来源，不顺带升级依赖。使用开发者自己的专用 Conda 环境；不创建或依赖 venv/.venv，不安装到 base、全局 Python 或用户 site，不写死维护者的环境路径。保留有效项目环境；迁移时先验证新链路，再处理旧环境。
+2. `pyproject.toml` 是Python依赖声明，Electron由`desktop/package.json`及锁文件声明，源码 `__version__` 是版本来源。使用开发者自己的专用 Conda 环境；不创建或依赖 venv/.venv，不安装到 base、全局 Python 或用户 site。保留有效项目环境；迁移时先验证新链路，再处理旧环境。
 3. PowerShell 安装、源码、测试命令使用 `conda run -n <项目环境>`，实时输出加 `--no-capture-output`；Python 使用 `-s`，pip 安装使用 `--no-user`。EXE 无显式参数时固定选择 `auto-gpu`，不继承其他已激活环境；双击前管理器须可由 `CONDA_EXE` 或 `PATH` 定位。GUI 与内部 worker 使用同一环境的解释器；核对 `sys.prefix`、实际模块/依赖位置，不能只看环境名或安装返回码。
 4. 轻量 EXE 只启动源码，不冻结业务或附带邻接运行时目录。构建只写暂存目录，按改动核验环境选择、缺失依赖、拒绝 base/全局回退、真实 GUI、worker 停止退出及源码更新生效。保留代码根与资料根的区分；纯安装诊断无需重建 EXE，未验平台不宣称兼容。
 5. 图标变化分原件、转换、框架加载、系统显示核对；ICO 保留作者帧，PNG 各尺寸从原图生成。仅修改实际轻量启动器，不能改写项目 Python；保留 PyInstaller 归档，分别检查首次、热更换和实际使用的入口。
