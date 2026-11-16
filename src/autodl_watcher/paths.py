@@ -23,6 +23,8 @@ def application_root() -> Path:
     if override:
         return Path(override).expanduser().resolve()
     if getattr(sys, "frozen", False):
+        if Path(sys.executable).stem.lower() == "autodl-backend":
+            raise RuntimeError("安装版后台缺少主程序指定的个人资料目录")
         executable = Path(sys.executable).resolve()
         # 内部 worker 与公开 GUI 使用同一根；通常也由 GUI 显式传入环境变量。
         return executable.parent.parent if executable.stem == "AutoDLWorker" else executable.parent

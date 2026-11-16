@@ -16,8 +16,52 @@ from . import __version__
 from .paths import application_root, prepare_application, source_root
 
 
+def installed_runtime() -> bool:
+    return bool(getattr(sys, "frozen", False) and Path(sys.executable).stem.lower() == "autodl-backend")
+
+
+def worker_command(task: str, *arguments: str) -> list[str]:
+    """源码与安装版共用任务名称，解释器和冻结程序参数分别匹配实际入口。"""
+    modules = {"monitor": "autodl_watcher.main", "discover": "autodl_watcher.gui",
+               "login": "autodl_watcher.login", "exe-icon": "autodl_watcher.exe_icon"}
+    module = modules[task]
+    if installed_runtime():
+        return [project_python(), task, *arguments]
+    extra = ["--discover"] if task == "discover" else []
+    return [project_python(), "-s", "-u", "-m", module, *extra, *arguments]
+
+
+def check_installed_environment() -> dict:
+    """验证随包入口和业务资源来源，安装版不借用开发环境。"""
+    supplied = os.environ.get("AUTODL_PROGRAM_RESOURCES", "")
+    resources = Path(supplied)
+    if not installed_runtime() or not supplied or not resources.is_absolute():
+        raise RuntimeError("安装版后台需要由主程序从程序资源目录启动")
+    expected = resources / "backend" / "autodl-backend.exe"
+    if expected.resolve() != Path(sys.executable).resolve():
+        raise RuntimeError("安装版后台与程序资源目录不匹配")
+    if not Path(os.environ.get("AUTODL_APP_ROOT", "")).is_absolute():
+        raise RuntimeError("安装版后台需要个人资料目录的绝对路径")
+    root = application_root().resolve()
+    if root.is_relative_to(resources.parent.resolve()):
+        raise RuntimeError("个人资料目录须位于安装程序目录之外")
+    bundle = Path(sys._MEIPASS).resolve()
+    if not Path(__file__).resolve().is_relative_to(bundle):
+        raise RuntimeError("业务模块未从随包运行时加载")
+    dependencies = {}
+    for name in ("yaml", "dotenv", "playwright", "requests", "PIL"):
+        module = import_module(name)
+        location = Path(module.__file__).resolve()
+        if not location.is_relative_to(bundle):
+            raise RuntimeError(f"安装版依赖{name}未从随包运行时加载")
+        dependencies[name] = {"module_paths": [str(location)]}
+    return {"environment": "installed", "prefix": str(bundle), "python": str(expected.resolve()),
+            "source_root": str(bundle), "resources": str(resources.resolve()), "user_site_enabled": False,
+            "dependencies": dependencies}
+
+
 def project_python() -> str:
-    """后台始终使用当前项目Conda中的控制台解释器，以保留日志和输入管道。"""
+    """后台使用当前项目解释器或随包程序，以保留日志和输入管道。"""
     executable = Path(sys.executable)
     if executable.name.lower() == "pythonw.exe":
         executable = executable.with_name("python.exe")  # 只换同目录程序，不从PATH寻找另一个环境。
@@ -41,6 +85,8 @@ def child_environment(root: Path | None = None) -> dict[str, str]:
 
 def check_environment() -> dict:
     """检查conda run实际选择的环境和依赖来源，不安装或修改任何配置。"""
+    if installed_runtime():
+        return check_installed_environment()
     prefix = Path(sys.prefix).resolve()
     active = os.environ.get("CONDA_PREFIX", "")
     name = os.environ.get("CONDA_DEFAULT_ENV", "")

@@ -18,31 +18,24 @@ from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
-from .network_activity import NETWORK_PREFIX, emit_observation, set_observer
+from .network_activity import NETWORK_PREFIX, set_observer
 from .theme import ThemeManager
-from .launcher import child_environment, project_python as worker_python
+from .launcher import child_environment, project_python as worker_python, worker_command
 from .app_icon import IconManager
 from .cli import normalize_host, positive_seconds
 from .config import load_config, validate_telemetry_endpoint
 from .gpu_resources import resource_rows, server_state
-from .login import LocalStartupError
+from .discovery import discovery_rows
 from .training_config import TrainingServer, load_servers, save_servers  # GUI 只读取训练配置边界，不加载解析聚合模块。
 from .training_ui import TrainingPane
 from .training_service import TrainingService
 from .training_ai_ui import AIAssistant
-from .session import GPU_PREFIX, REPORT_PREFIX, SESSION_PREFIX, emit_gpu_samples, emit_session
+from .session import GPU_PREFIX, REPORT_PREFIX, SESSION_PREFIX
 from .paths import application_root, default_config_path, prepare_application
 from .yaml_settings import read_settings, settings_source, write_settings
 
 ROOT = application_root()  # 所有启动入口共用源码/安装包/成品布局规则。
 DATA_PREFIX = "WATCHER_HOSTS "  # 约定的结构化输出前缀；主机列表与普通日志共用 stdout 管道。
-
-
-def worker_command(task, *args):  # 主程序始终运行源码，后台复用同一个Conda解释器。
-    modules = {"monitor": "autodl_watcher.main", "discover": "autodl_watcher.gui",
-               "login": "autodl_watcher.login"}
-    module = modules[task]  # 仅允许这三个应用任务，不执行任意模块。
-    return [worker_python(), "-s", "-u", "-m", module, *(["--discover"] if task == "discover" else []), *args]
 
 
 def status_level(line):  # 当前状态与实时输出统一用相同的颜色判断。
@@ -682,85 +675,9 @@ class WatcherWindow:  # 只负责交互与进程管理，监控业务仍由 main
 
 
 
-def discovery_rows(config, hosts, instances):  # 只有账号真实实例UUID与入口/配置同时相符，才显示可开机资格。
-    targets = {item.machine_name: item for item in config.auto_start.targets if item.enabled and item.instance_uuid}
-    rows = []
-    for host in hosts:
-        for name, idle, total in host.source_slots:
-            existing = [item for item in (instances or []) if item.get("machine_name") == name]
-            target = targets.get(name)
-            if instances is None:
-                label = "未核验"
-            elif not existing:
-                label = "无实例"
-            elif not target or not config.auto_start.enabled:
-                label = "待配置"
-            elif not any(item.get("instance_uuid") == target.instance_uuid for item in existing):
-                label = "实例已变更"
-            else:
-                label = "可开机"
-            rows.append((name, f"{idle}/{total}", label))
-    return rows
-
-
-def discover():  # 子进程模式：采集结果编码为一行 JSON，供父进程更新服务器表格。
-    from .collectors import PlatformBrowserCollector, TelemetryApiCollector
-    from .collectors.telemetry import TelemetryUnavailable
-    from .collectors.platform import PlatformAuthenticationError
-    config = load_config(default_config_path(ROOT))
-    collector = PlatformBrowserCollector(config.platform)
-    previous = set_observer(emit_observation)  # 一次性刷新同样报告已发生的真实请求。
-    try:
-        emit_session("checking", "正在核验真实主机接口")
-        hosts = collector.collect()
-        try:
-            instances = collector.get_account_instances()
-            if not isinstance(instances, list):
-                raise ValueError("实例列表格式错误")
-        except PlatformAuthenticationError:
-            raise
-        except Exception:
-            instances = None
-            print("容器实例查询失败，自动开机资格未核验；平台仍可只读监控。", flush=True)
-        rows = discovery_rows(config, hosts, instances)
-        print(DATA_PREFIX + json.dumps(rows, ensure_ascii=False), flush=True)
-        emit_session("valid", "主机接口核验成功")
-        if hosts:
-            try:
-                validate_telemetry_endpoint(config.telemetry.endpoint)
-            except ValueError as exc:
-                emit_gpu_samples([], hosts, config.monitor.stale_after_seconds, str(exc))
-                print(str(exc), flush=True)
-                return  # 平台发现仍成功；缺少GPU数据不能把已确认的登录会话判为失效。
-            telemetry = TelemetryApiCollector(config.telemetry)
-            try:
-                emit_gpu_samples(telemetry.collect(), hosts, config.monitor.stale_after_seconds)
-            except TelemetryUnavailable as exc:
-                emit_gpu_samples([], hosts, config.monitor.stale_after_seconds, str(exc))
-                print("WATCHER_STATUS " + str(exc), flush=True)  # 保留采集站认证原因，不否定平台已验证会话。
-            except Exception:
-                emit_gpu_samples([], hosts, config.monitor.stale_after_seconds, "GPU 数据采集失败；可重试刷新")
-                print("GPU 数据采集失败，平台登录会话已核验有效。", flush=True)
-            finally:
-                telemetry.close()  # 一次性刷新不保留HTTP连接；图表失败不误报登录过期。
-
-    except Exception as exc:
-        if isinstance(exc, LocalStartupError):
-            message = f"服务器刷新失败，本地启动错误：{exc}"
-        elif isinstance(exc, PlatformAuthenticationError):
-            message = f"登录已失效，请点击登录 / 更新会话：{exc}"
-        else:
-            message = f"服务器刷新失败，无法确认会话，请重试：{exc}"
-        emit_session("invalid" if isinstance(exc, PlatformAuthenticationError) else "unknown", message)
-        print(message, flush=True)
-        raise SystemExit(1) from None  # 预期刷新错误不显示PyInstaller未处理异常堆栈。
-    finally:
-        try:
-            collector.close()  # 刷新成功与否都释放浏览器上下文，供后续任务使用。
-        except Exception as exc:
-            print(f"刷新浏览器清理失败：{exc}", flush=True)
-        set_observer(previous)
-
+def discover():  # 旧GUI参数保留入口，发现业务本身由无界面模块处理。
+    from .discovery import discover as run_discovery
+    run_discovery(ROOT, load_config(default_config_path(ROOT)))
 
 def main():  # 同一模块既可作为桌面入口，也可作为无界面的主机发现子进程。
     if "--discover" in sys.argv:

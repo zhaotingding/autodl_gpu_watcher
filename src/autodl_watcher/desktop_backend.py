@@ -25,7 +25,7 @@ from .cli import normalize_host, positive_seconds
 from .config import load_config, validate_telemetry_endpoint
 from .exe_icon import launcher_target
 from .gpu_resources import resource_rows, server_state
-from .launcher import check_environment, child_environment, project_python
+from .launcher import check_environment, child_environment, installed_runtime, project_python, worker_command
 from .network_activity import NETWORK_PREFIX, set_observer
 from .network_monitor import NetworkMonitor
 from .paths import application_root, default_config_path, prepare_application
@@ -140,8 +140,7 @@ class DesktopBackend:
 
     @staticmethod
     def _worker_command(task, *args):
-        modules = {"monitor": "autodl_watcher.main", "discover": "autodl_watcher.gui", "login": "autodl_watcher.login"}
-        return [project_python(), "-s", "-u", "-m", modules[task], *(["--discover"] if task == "discover" else []), *args]
+        return worker_command(task, *args)
 
     def _launch(self, task, command):
         if self.process is not None:
@@ -382,20 +381,22 @@ class DesktopBackend:
         return {"path": str(destination), "message": message}
 
     def _save_shortcut(self, path):
-        executable = launcher_target(os.environ.get("AUTODL_LAUNCHER_EXE"))
+        executable = launcher_target(os.environ.get("AUTODL_INSTALLED_EXE") if installed_runtime()
+                                     else os.environ.get("AUTODL_LAUNCHER_EXE"))
         if executable is None:
             raise ValueError("请从轻量启动器打开应用后再导出快捷方式")
         environment = os.environ.get("AUTODL_CONDA_ENV") or os.environ.get("CONDA_DEFAULT_ENV", "")
         manager = os.environ.get("AUTODL_CONDA_EXE") or os.environ.get("CONDA_EXE", "")
         conda = Path(manager) if manager else None
-        if environment.lower() in {"", "base", "root"} or conda is None or not conda.is_absolute() or not conda.is_file():
+        if not installed_runtime() and (environment.lower() in {"", "base", "root"} or conda is None or not conda.is_absolute() or not conda.is_file()):
             raise ValueError("未识别专用Conda环境或管理器，请从Conda轻量启动器打开应用后重试")
         target = Path(path)
         if target.suffix.lower() != ".lnk":
             raise ValueError("快捷方式须保存为.lnk")
         env = os.environ.copy()
+        arguments = ["--autodl-data-root", str(self.root)] if installed_runtime() else ["--env", environment, "--conda", str(conda)]
         env.update(AUTODL_LINK=str(target), AUTODL_EXE=str(executable), AUTODL_ICON=self._icon_settings()["path"],
-                   AUTODL_ARGS=subprocess.list2cmdline(["--env", environment, "--conda", str(conda)]))
+                   AUTODL_ARGS=subprocess.list2cmdline(arguments))
         shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
         script = "$ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut($env:AUTODL_LINK); $s.TargetPath=$env:AUTODL_EXE; $s.Arguments=$env:AUTODL_ARGS; $s.WorkingDirectory=Split-Path -LiteralPath $env:AUTODL_EXE; $s.IconLocation=$env:AUTODL_ICON+',0'; $s.Save()"
         result = subprocess.run([str(shell), "-NoProfile", "-NonInteractive", "-Command", script], env=env,
@@ -537,12 +538,12 @@ class DesktopBackend:
         if self.scheduler and self.scheduler is not threading.current_thread():
             self.scheduler.join(timeout=1)
         set_observer(self._previous_observer)
-        if self.icon_changed and os.name == "nt":
+        if self.icon_changed and os.name == "nt" and not installed_runtime():
             try:
                 executable = launcher_target(os.environ.get("AUTODL_LAUNCHER_EXE"))
                 if executable is not None:
                     owner = os.environ.get("AUTODL_DESKTOP_PID") or str(os.getpid())
-                    self._popen([project_python(), "-u", "-m", "autodl_watcher.exe_icon", owner, str(executable)],
+                    self._popen(worker_command("exe-icon", owner, str(executable)),
                         env=child_environment(self.root), close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW)
                     self.icon_changed = False  # 辅助进程等待真正Electron窗口退出，沿用原EXE资源同步。
             except OSError as exc:
@@ -566,6 +567,8 @@ def main():
 
     try:
         check_environment()  # Electron显式解释器入口同样检查专用Conda及依赖实际来源。
+        if installed_runtime() and args.root is not None and args.root.resolve() != application_root().resolve():
+            raise ValueError("安装版资料目录由主程序指定，--root与已选择的资料目录不一致")
         backend = DesktopBackend(args.root)
     except Exception as exc:
         send({"event": "backend.error", "data": {"message": excerpt(str(exc))}})
