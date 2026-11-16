@@ -4,8 +4,21 @@ const { createInterface } = require('node:readline')
 const { pathToFileURL } = require('node:url')
 const path = require('node:path')
 
-const projectRoot = path.dirname(__dirname)
-const dataRoot = path.resolve(process.env.AUTODL_APP_ROOT || projectRoot)
+const metadata = require('./package.json')
+const installed = app.isPackaged && metadata.autodlInstalled === true
+const updated = process.argv.includes('--updated')
+const installerRoot = path.join(__dirname, installed ? 'installer' : '../installer')
+const { createUpdates } = require(path.join(installerRoot, 'update.cjs'))
+const { installedProfile } = require(path.join(installerRoot, 'installed-profile.cjs'))
+const projectRoot = installed ? process.resourcesPath : path.dirname(__dirname)
+let profile
+let profileError
+if (installed) {
+  try { profile = installedProfile(app, metadata.autodlLocalUpdateTest === true, projectRoot) }
+  catch (error) { profileError = error }
+}
+const dataRoot = path.resolve(profile?.root || process.env.AUTODL_APP_ROOT || projectRoot)
+let setupPending = installed && !updated && (process.argv.includes('--autodl-open-setup') || profile?.setupPending())
 const entry = 'autogpu://app/index.html'
 const pythonIndex = process.argv.indexOf('--python')
 const python = pythonIndex >= 0 ? process.argv[pythonIndex + 1] : process.env.AUTODL_PYTHON
@@ -18,7 +31,7 @@ const methods = new Set([
 const resources = new Set(['index.html', 'renderer.js', 'styles.css'])
 
 app.setName('Auto算力与训练调度')
-app.setPath('userData', path.join(dataRoot, '.ui', 'electron'))
+if (!profileError) app.setPath('userData', path.join(dataRoot, '.ui', 'electron'))
 protocol.registerSchemesAsPrivileged([{ scheme: 'autogpu', privileges: {
   standard: true, secure: true, supportFetchAPI: true,
 } }])
@@ -32,6 +45,8 @@ let selectedIcon = null
 let selectedShortcut = null
 let backendFailure = ''
 let applicationVersion = ''
+let updates
+let updateTimers = []
 const pending = new Map()
 
 function titleBar(theme) {
@@ -63,6 +78,10 @@ function popupMenu(name, position) {
       { label: '实际大小', role: 'resetZoom' }, { label: '全屏', role: 'togglefullscreen' },
     ],
     help: [
+      { label: '检查更新', click: () => emit('check-update', {}) },
+      { label: updates?.status().version ? '更新并重启到 ' + updates.status().version : '更新并重启',
+        enabled: updates?.status().canInstall === true, click: () => emit('request-update', {}) },
+      { type: 'separator' },
       { label: '使用说明', click: () => { void shell.openPath(path.join(projectRoot, 'README.md')) } },
       { label: '关于 Auto算力与训练调度', click: () => {
         void dialog.showMessageBox(window, { type: 'info', title: '关于', message: 'Auto算力与训练调度',
@@ -105,16 +124,26 @@ function backend(method, params = {}) {
 }
 
 function startBackend() {
-  if (!python || !path.isAbsolute(python)) {
+  const executable = installed ? path.join(projectRoot, 'backend', 'autodl-backend.exe') : python
+  if (!executable || !path.isAbsolute(executable)) {
     throw new Error('请从项目Conda环境启动应用，或通过 --python 指定该项目解释器的完整路径。')
   }
   const environment = { ...process.env, AUTODL_APP_ROOT: dataRoot, AUTODL_DESKTOP_PID: String(process.pid),
-    PYTHONUTF8: '1', PYTHONNOUSERSITE: '1', PYTHONPATH: path.join(projectRoot, 'src') }
+    PYTHONUTF8: '1', PYTHONNOUSERSITE: '1' }
   if (process.argv.includes('--debug')) environment.AUTODL_DEBUG = '1'
   delete environment.PYTHONHOME
-  child = spawn(python, ['-s', '-u', '-m', 'autodl_watcher.desktop_backend'], {
-    cwd: projectRoot, env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+  delete environment.PYTHONPATH
+  if (installed) {
+    environment.AUTODL_PROGRAM_RESOURCES = projectRoot
+    environment.AUTODL_INSTALLED_EXE = process.execPath
+    delete environment.AUTODL_PYTHON
+    delete environment.AUTODL_LAUNCHER_EXE
+  } else environment.PYTHONPATH = path.join(projectRoot, 'src')
+  const processChild = spawn(executable, installed ? ['bridge'] : ['-s', '-u', '-m', 'autodl_watcher.desktop_backend'], {
+    cwd: dataRoot, env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
   })
+  child = processChild
+  backendFailure = ''
   // 请求正文、口令及完整后台诊断不写入Electron控制台或页面日志。
   child.stderr.on('data', () => {})
   child.stdin.on('error', () => {})
@@ -123,6 +152,7 @@ function startBackend() {
     emit('backend.error', { message: '无法启动所选Python解释器，请检查项目环境。' })
   })
   child.on('close', code => {
+    if (child !== processChild) return  // 更新恢复时，旧进程退出不能覆盖新后台状态。
     const message = backendFailure || 'Python桌面后台已退出（退出码 ' + code + '）。'
     failPending(new Error(message))
     emit('backend.exit', { code, message })
@@ -168,16 +198,33 @@ function objectParams(value) {
 }
 
 async function requestClose() {
-  if (closing || shutdown) return
+  if (closing || shutdown) return false
   closing = true
+  const forUpdate = updates?.status().phase === 'restarting'
   emit('closing', { message: '正在停止采集并等待后台保存结果…' })
   try {
+    const proc = child
+    const exited = new Promise(resolve => proc.once('close', resolve))
     await backend('shutdown')
     shutdown = true
     child.stdin.end()
+    if (forUpdate) {
+      if (await exited !== 0) throw new Error('Python后台未正常退出，暂时不能安装更新。')
+      updates.installAfterClose()
+      return true
+    }
     window.destroy()
     app.quit()
+    return true
   } catch (error) {
+    if (forUpdate) {
+      shutdown = closing = false
+      updates.cancelRestart('安装包已下载，请完成当前操作后重试。')
+      if (child.exitCode !== null) await restoreBackend()
+      emit('close.cancelled', { message: error.message })
+      await dialog.showMessageBox(window, { type: 'warning', title: '暂不能安装更新', message: error.message })
+      return false
+    }
     if (child.exitCode !== null || !child.stdin.writable) {
       shutdown = true
       window.destroy()
@@ -187,12 +234,47 @@ async function requestClose() {
     closing = false
     emit('close.cancelled', { message: error.message })
     await dialog.showMessageBox(window, { type: 'warning', title: '关闭尚未完成', message: error.message })
+    return false
   }
+}
+
+async function restoreBackend() {
+  shutdown = closing = false
+  try {
+    startBackend()
+    await backend('snapshot')
+    emit('close.cancelled', { message: '更新安装未启动，后台已恢复，可继续使用或重试。' })
+  } catch (error) {
+    emit('backend.error', { message: error.message })
+  }
+}
+
+function desktopSnapshot(state) {
+  if (installed) {
+    state.app = { ...state.app, backend_version: state.app.version, version: app.getVersion() }
+    state.installed = true
+    state.setupPending = Boolean(setupPending)
+  }
+  return state
 }
 
 async function invoke(event, method, params) {
   checkSender(event)
   objectParams(params)
+  if (method === 'desktop.update.status') return updates.status()
+  if (method === 'desktop.update.check') return updates.check()
+  if (method === 'desktop.update.install') return updates.updateAndRestart()
+  if (method === 'desktop.setup.complete') {
+    if (installed) profile.completeSetup()
+    setupPending = false
+    return true
+  }
+  if (method === 'desktop.confirmUnsaved') {
+    const result = await dialog.showMessageBox(window, { type: 'question', title: '更新前保存设置',
+      message: '当前设置尚未保存，请选择保存后更新或放弃本次编辑。',
+      buttons: ['保存并继续', '放弃编辑并继续', '取消'], defaultId: 0, cancelId: 2, noLink: true })
+    return result.response
+  }
   if (method === 'desktop.confirm') {
     const result = await dialog.showMessageBox(window, {
       type: 'question', title: String(params.title || '确认操作'), message: String(params.message || ''),
@@ -232,6 +314,7 @@ async function invoke(event, method, params) {
     selectedShortcut = null
   }
   const result = await backend(method, params)
+  if (method === 'snapshot') return desktopSnapshot(result)
   if ((method === 'icon.import' || method === 'icon.reset') && result?.path) window.setIcon(result.path)
   return result
 }
@@ -261,6 +344,7 @@ if (!app.requestSingleInstanceLock()) {
     window.focus()
   })
   app.whenReady().then(async () => {
+    if (profileError) throw profileError
     session.defaultSession.setSpellCheckerEnabled(false)
     // Chromium仍会初始化词典下载器，将它限定到本地404路径，避免访问默认CDN。
     session.defaultSession.setSpellCheckerDictionaryDownloadURL('autogpu://app/dictionaries/')
@@ -274,11 +358,12 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null)
     app.setAppUserModelId('AutoDL.GPUWatcher')
     startBackend()
-    const state = await backend('snapshot')
+    const state = desktopSnapshot(await backend('snapshot'))
+    if (installed) profile.saveSelection()  // 资料选择只在后台成功启动后写一次，轮询快照不写磁盘。
     applicationVersion = state.app.version
     nativeTheme.themeSource = state.theme === 'light' ? 'light' : 'dark'
     window = new BrowserWindow({ title: 'Auto算力与训练调度', width: 1440, height: 900,
-      minWidth: 860, minHeight: 660, icon: state.icon?.path || path.join(projectRoot, 'src', 'autodl_watcher', 'default.ico'),
+      minWidth: 860, minHeight: 660, icon: state.icon?.path || path.join(projectRoot, installed ? 'assets/app-icon.ico' : 'src/autodl_watcher/default.ico'),
       backgroundColor: state.theme === 'light' ? '#fafafa' : '#1b1b1b',
       titleBarStyle: 'hidden', titleBarOverlay: titleBar(state.theme),
       show: false,
@@ -286,6 +371,21 @@ if (!app.requestSingleInstanceLock()) {
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false,
         spellcheck: false },
     })
+    const updater = installed && metadata.autodlLocalPreview !== true && process.platform === 'win32'
+      ? require('electron-updater').autoUpdater : null
+    updates = createUpdates(updater, {
+      notify: value => emit('update', value),
+      requestClose: () => {
+        if (closing || shutdown) return false
+        void requestClose()
+        return true
+      },
+      restoreBackend,
+      unavailableMessage: installed ? '本地验收安装包使用手动覆盖升级，公开更新将在正式签名发布后启用。' : undefined,
+    })
+    if (updater) {
+      updateTimers = [setTimeout(() => void updates.check(), 10000), setInterval(() => void updates.check(), 6 * 60 * 60 * 1000)]
+    }
     ipcMain.handle('watcher:invoke', invoke)
     ipcMain.handle('watcher:chooseFile', chooseFile)
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -303,4 +403,5 @@ if (!app.requestSingleInstanceLock()) {
     app.exit(1)
   })
   app.on('window-all-closed', () => app.quit())
+  app.on('will-quit', () => { for (const timer of updateTimers) clearTimeout(timer) })
 }

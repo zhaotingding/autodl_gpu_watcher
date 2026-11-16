@@ -1,5 +1,7 @@
 # Conda 安装与轻量 Windows 启动器
 
+以下Conda与轻量启动器约束适用于源码开发链。1.1.3安装交付、随包运行时、目录迁移及应用内更新见[安装参考](installer.md)。
+
 1.1.0起默认入口为Electron，2026-11-15核对。Node.js 22.12+下在源码根先执行`npm.cmd ci --prefix desktop`及`npm.cmd run setup-runtime --prefix desktop`。`launcher.gui_main`调用`electron_launcher.launch`，以AUTODL_PYTHON传当前Conda解释器给Electron主进程，后者运行Python桌面后台；内部采集worker继续同环境。源码资源及本地Electron依赖须存在，缺失时明确提示安装。轻量EXE仍通过现有源码入口，旧Tk保留`--legacy-tk`。Python wheel的CLI及资源检查继续适用，Electron默认窗口要求源码检出和desktop依赖。
 
 安装、构建、启动入口或后台环境问题时读取。2026-10-19 确认的新设计以专用 Conda 环境运行源码；旧 venv 和完整冻结成品流程仅作为历史证据保留。新链已于同日完成 Windows 11 / Python 3.11 专用 Conda、源码/轻量 EXE/worker、wheel 轮替安装及 440 项离线回归；此结果不代表其他平台或云端 CI，实际执行结果见[重构验收记录](../../../../docs/重构验收记录.md)。

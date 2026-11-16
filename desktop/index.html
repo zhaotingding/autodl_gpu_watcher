@@ -14,7 +14,7 @@
       <button id="app-menu-file" class="titlebar-menu" type="button" data-menu="file" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+F">文件</button>
       <button id="app-menu-edit" class="titlebar-menu" type="button" data-menu="edit" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+E">编辑</button>
       <button id="app-menu-view" class="titlebar-menu" type="button" data-menu="view" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+V">视图</button>
-      <button id="app-menu-help" class="titlebar-menu" type="button" data-menu="help" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+H">帮助</button>
+      <button id="app-menu-help" class="titlebar-menu" type="button" data-menu="help" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+H">帮助<span class="update-dot" hidden aria-hidden="true"></span></button>
     </nav>
     <span class="titlebar-title">Auto算力与训练调度</span>
   </header>
@@ -30,6 +30,8 @@
     <footer class="statusbar"><span id="global-status">等待后台就绪</span><span>Electron · Python</span></footer>
   </main>
   <dialog id="detail-dialog" class="detail-dialog"><div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" class="icon-button" id="dialog-close" aria-label="关闭">×</button></div><div id="dialog-content" class="dialog-content"></div></dialog>
+  <dialog id="setup-dialog" class="detail-dialog setup-dialog"><div class="dialog-heading"><h2>基础设置</h2></div><div id="setup-content" class="dialog-content"></div></dialog>
+  <dialog id="update-dialog" class="detail-dialog update-dialog"><div class="dialog-heading"><h2>应用更新</h2><button type="button" class="icon-button" id="update-close" aria-label="关闭更新窗口">×</button></div><div class="dialog-content"><p id="update-status" role="status">正在读取更新状态…</p><p id="update-version" class="detail-meta top-gap"></p><progress id="update-progress" max="100" value="0" hidden></progress><div class="form-actions"><button type="button" id="update-check" data-action="update-check">检查更新</button><button type="button" id="update-install" data-action="update-install" class="primary" disabled>更新并重启</button></div></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

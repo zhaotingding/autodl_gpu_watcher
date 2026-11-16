@@ -22,6 +22,11 @@ const state = {
   desktopMessage: "",
   dialogGeneration: 0,
   monitorEntry: "",
+  updates: null,
+  setupShown: false,
+  setupConfig: null,
+  dirtyForms: new WeakSet(),
+  formSavePromise: null,
 };
 const $ = (selector, parent = document) => parent.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({
@@ -77,6 +82,72 @@ async function call(method, params = {}, clicked = null) {
 
 async function confirmAction(title, message) {
   return api.invoke("desktop.confirm", { title, message });
+}
+
+function updateStatus(value) {
+  state.updates = value;
+  const available = Boolean(value.canInstall && value.version);
+  $("#app-menu-help .update-dot").hidden = !available;
+  $("#app-menu-help").title = available ? `可更新到 ${value.version}` : "帮助";
+  $("#update-status").textContent = value.message;
+  $("#update-version").textContent = value.version ? `可用版本 ${value.version}` : "";
+  const busy = ["checking", "downloading", "restarting"].includes(value.phase);
+  $("#update-install").disabled = !value.canInstall;
+  $("#update-check").disabled = busy;
+  $("#update-close").disabled = ["downloading", "restarting"].includes(value.phase);
+  $("#update-progress").hidden = !Number.isFinite(value.percent);
+  if (Number.isFinite(value.percent)) $("#update-progress").value = value.percent;
+}
+
+async function checkUpdates() {
+  if (!$("#update-dialog").open) $("#update-dialog").showModal();
+  updateStatus(await call("desktop.update.check"));
+}
+
+async function requestUpdate() {
+  const form = $("#settings-content form");
+  if (form && state.dirtyForms.has(form)) {
+    const choice = await call("desktop.confirmUnsaved");
+    if (choice === 2) return;
+    if (choice === 0) {
+      if (!form.reportValidity()) return;
+      state.formSavePromise = null;
+      form.requestSubmit();
+      if (!await state.formSavePromise) return;
+    } else state.dirtyForms.delete(form);
+  }
+  if (!$("#update-dialog").open) $("#update-dialog").showModal();
+  updateStatus(await call("desktop.update.install"));
+}
+
+async function showBasicSetup() {
+  const response = await call("ai.settings");
+  const config = response.settings || response.config;
+  state.setupConfig = config;
+  $("#setup-content").innerHTML = `<p class="detail-meta">已有设置和历史资料继续使用。可以调整主题，或填写自己的模型接口密钥。</p><form id="basic-setup-form"><div class="form-grid">${select("setup-theme", "界面主题", [["dark", "深色"], ["light", "浅色"]], state.snapshot.theme)}${field("setup-base", "API 基础地址", config.base_url || "https://api.openai.com/v1", "url")}${field("setup-model", "模型 ID", config.model || "")}${field("setup-key", "API 密钥", "", "password", `autocomplete="new-password" placeholder="${response.has_key ? "留空保留已存密钥" : "可稍后配置"}"`)}</div><p class="form-note">保存密钥时请填写对应模型ID。留空或跳过会沿用已有凭据，日常监控按原设置运行。</p><div class="form-actions"><button type="button" id="setup-skip" data-action="setup-skip">跳过并进入应用</button><button type="submit" id="setup-complete" class="primary">保存并进入应用</button></div></form>`;
+  $("#setup-dialog").showModal();
+}
+
+async function finishSetup(save) {
+  if (save) {
+    const key = $("#setup-key").value;
+    const base = $("#setup-base").value.trim();
+    const model = $("#setup-model").value.trim();
+    const apiChanged = base !== state.setupConfig.base_url || model !== (state.setupConfig.model || "");
+    if (key.trim() || apiChanged) {
+      if (!model) { toast("请输入密钥对应的模型 ID，或跳过后在全局设置中配置。", true); return false; }
+      await call("ai.save", { settings: { ...state.setupConfig, base_url: base, model }, key });
+      $("#setup-key").value = "";
+    }
+    const theme = $("#setup-theme").value;
+    await call("preferences.save", { preferences: { ui: { theme } } });
+    applyTheme(theme);
+  }
+  await call("desktop.setup.complete");
+  $("#setup-key").value = "";
+  $("#setup-dialog").close();
+  await refresh();
+  return true;
 }
 
 function applyTheme(theme) {
@@ -323,6 +394,10 @@ async function refresh() {
     state.snapshot = snapshot;
     if (snapshot.theme !== oldTheme) applyTheme(snapshot.theme);
     render();
+    if (snapshot.setupPending && !state.setupShown) {
+      state.setupShown = true;
+      await showBasicSetup();
+    }
   } catch (error) {
     $("#backend-status").textContent = "后台连接异常";
     $("#global-status").textContent = error.message || String(error);
@@ -422,6 +497,9 @@ document.addEventListener("click", async (event) => {
       return openDialog("连接详情", `<pre class="detail-pre">${escapeHtml(details.filter(Boolean).join("\n"))}</pre>`);
     }
     const action = target.dataset.action;
+    if (action === "setup-skip") return await finishSetup(false);
+    if (action === "update-check") return await checkUpdates();
+    if (action === "update-install") return await requestUpdate();
     const server = selectedServer();
     if (action === "monitor-start") {
       const preferences = state.snapshot.preferences || {};
@@ -499,14 +577,15 @@ document.addEventListener("click", async (event) => {
   } catch (_) { /* call已显示具体错误，保留页面和输入供用户修正。 */ }
 });
 
-document.addEventListener("submit", async (event) => {
+async function saveSettingsForm(event) {
   event.preventDefault();
-  if (state.desktopClosing) return;
+  if (state.desktopClosing) return false;
   const submitter = event.submitter;
   try {
+    if (event.target.id === "basic-setup-form") return await finishSetup(true);
     if (event.target.id === "monitor-form") {
       const preferences = collectMonitorForm();
-      if (preferences.live && !state.snapshot.preferences.live && !await confirmAction("启用真实自动开机", "启用后下次启动平台监控可能执行真实开关机并产生费用。确认保存？")) return;
+      if (preferences.live && !state.snapshot.preferences.live && !await confirmAction("启用真实自动开机", "启用后下次启动平台监控可能执行真实开关机并产生费用。确认保存？")) return false;
       await call("preferences.save", { preferences }, submitter);
       $("#telemetry-password").value = "";
       applyTheme(preferences.ui.theme);
@@ -521,7 +600,7 @@ document.addEventListener("submit", async (event) => {
     }
     if (event.target.id === "ai-form") {
       const settings = { ...state.aiSettings, base_url: $("#ai-base").value.trim(), protocol: $("#ai-protocol").value, model: $("#ai-model").value.trim(), service_tier: $("#ai-tier").value, auto_generate: $("#ai-auto").checked, prompt: $("#ai-prompt").value, max_log_chars: Number($("#ai-max").value) };
-      if (settings.auto_generate && !state.aiSettings.auto_generate && !await confirmAction("自动生成训练规则", "新任务会自动向 AI 接口发送日志并产生费用，每任务首次调用。确认启用？")) return;
+      if (settings.auto_generate && !state.aiSettings.auto_generate && !await confirmAction("自动生成训练规则", "新任务会自动向 AI 接口发送日志并产生费用，每任务首次调用。确认启用？")) return false;
       settings.pricing = { model: settings.model, base_url: settings.base_url };
       for (const [key, id] of [["input", "price-input"], ["output", "price-output"], ["cached", "price-cached"], ["write", "price-write"], ["flex_multiplier", "price-flex"], ["usd_cny", "price-cny"]]) settings.pricing[key] = $("#" + id).value === "" ? null : Number($("#" + id).value);
       await call("ai.save", { settings, key: $("#ai-key").value }, submitter);
@@ -530,11 +609,19 @@ document.addEventListener("submit", async (event) => {
       toast("AI 设置已保存。");
     }
     await refresh();
+    state.dirtyForms.delete(event.target);
     if (event.target.id === "server-form") renderSettingsContent();
-  } catch (_) { /* 保持表单内容，凭据只存在于当前输入框和本次IPC调用。 */ }
+    return true;
+  } catch (_) { return false; /* 保持表单内容，凭据只存在于当前输入框和本次IPC调用。 */ }
+}
+document.addEventListener("submit", (event) => {
+  state.formSavePromise = saveSettingsForm(event);
 });
 
 document.addEventListener("change", async (event) => {
+  const form = event.target.closest("form");
+  const autoPin = event.target.id === "server-pinned" && state.snapshot.servers.some(server => server.id === state.editingServer);
+  if (form && !autoPin && !["theme-choice", "setup-theme"].includes(event.target.id)) state.dirtyForms.add(form);
   if (event.target.id === "monitor-entry") state.monitorEntry = event.target.value;
   if (event.target.id === "network-view") {
     state.networkView = event.target.value;
@@ -543,7 +630,7 @@ document.addEventListener("change", async (event) => {
   if (event.target.id === "network-auto") state.networkAutomatic = event.target.checked;
   if (event.target.id === "monitor-live" && !event.target.checked) $("#monitor-convert").checked = false;
   if (event.target.id === "telemetry-password" && event.target.value) $("#telemetry-enabled").checked = true;
-  if (event.target.id === "theme-choice") {
+  if (["theme-choice", "setup-theme"].includes(event.target.id)) {
     try {
       const theme = event.target.value;
       await call("preferences.save", { preferences: { ui: { theme } } });
@@ -565,6 +652,8 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  const form = event.target.closest("form");
+  if (form) state.dirtyForms.add(form);
   if (event.target.id === "network-filter") {
     state.networkFilter = event.target.value;
     render();
@@ -598,6 +687,11 @@ $("#settings-nav").addEventListener("click", () => navigate("settings"));
 $("#network-nav").addEventListener("click", () => navigate("network"));
 $("#dialog-close").addEventListener("click", () => $("#detail-dialog").close());
 $("#detail-dialog").addEventListener("close", () => { state.dialogGeneration += 1; });
+$("#setup-dialog").addEventListener("cancel", (event) => { event.preventDefault(); void finishSetup(false).catch(() => {}); });
+$("#update-close").addEventListener("click", () => { if (!$("#update-close").disabled) $("#update-dialog").close(); });
+$("#update-dialog").addEventListener("cancel", (event) => {
+  if (["downloading", "restarting"].includes(state.updates?.phase)) event.preventDefault();
+});
 $("#theme-toggle").addEventListener("click", async () => {
   try {
     const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
@@ -615,6 +709,9 @@ if (!api) {
   api.onEvent((event) => {
     const name = event.event || event.type;
     const message = event.data?.message || event.message;
+    if (name === "update") updateStatus(event.data);
+    if (name === "check-update") checkUpdates().catch(() => {});
+    if (name === "request-update") requestUpdate().catch(() => {});
     if (name === "navigate" && ["platform", "network", "settings"].includes(event.data?.page)) {
       navigate(event.data.page);
     }
@@ -638,6 +735,7 @@ if (!api) {
     $("#global-status").textContent = state.desktopMessage || state.snapshot?.worker?.status || "后台就绪";
   });
   refresh();
+  call("desktop.update.status").then(updateStatus).catch(() => {});
   setInterval(refresh, 1500); // 读取后台内存状态，实际平台与SSH采样由Python服务按用户间隔调度。
   setInterval(() => {
     if (state.page === "network" && state.networkAutomatic) refreshNetwork().catch(() => {});

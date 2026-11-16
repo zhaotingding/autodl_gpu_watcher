@@ -24,5 +24,6 @@ dist/
 # Electron运行时由desktop锁文件安装，个人Chromium缓存保留在忽略目录。
 desktop/node_modules/
 
-# 随包后台构建产物。
+# 安装版构建产物与本机选定的程序目录。
 /installer/dist/
+/installed/

@@ -10,11 +10,16 @@
   "scripts": {
     "setup-runtime": "install-electron && node brand-runtime.mjs",
     "start": "conda run -n auto-gpu --no-capture-output python -s -m autodl_watcher",
-    "smoke": "node ../tests/electron_smoke.cjs"
+    "smoke": "node ../tests/electron_smoke.cjs",
+    "build:installer": "node ../installer/build-installer.mjs"
   },
   "devDependencies": {
     "electron": "45.3.2",
-    "resedit": "3.1.0"
+    "resedit": "3.1.0",
+    "electron-builder": "26.18.0"
   },
-  "description": "GPU资源监控与训练调度"
+  "description": "GPU资源监控与训练调度",
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  }
 }
