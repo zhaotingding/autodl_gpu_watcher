@@ -96,7 +96,7 @@ npm.cmd ci --prefix desktop
 npm.cmd run setup-runtime --prefix desktop
 ```
 
-退出码应为 `0`，并生成 `desktop/node_modules/electron/dist/electron.exe`。Python 依赖由 `pyproject.toml` 声明，界面依赖与精确版本由 `desktop/package.json` 和 `desktop/package-lock.json` 声明。
+两条命令的退出码都应为 `0`。第二条命令准备 `desktop/node_modules/electron/dist/autodl-watcher-desktop.exe`，Windows 任务管理器会显示项目名称「Auto算力与训练调度」和默认图标。如果失败，请保留报错命令和完整输出。Python 依赖由 `pyproject.toml` 声明，界面依赖与精确版本由 `desktop/package.json` 和 `desktop/package-lock.json` 声明。
 **窗口权限：普通 PowerShell。** 仍在仓库目录执行；每条成功后再执行下一条：
 ```powershell
 conda run -n auto-gpu --no-capture-output python -s -m pip check
@@ -212,7 +212,8 @@ git pull --ff-only
 | --- | --- | --- |
 | 只有普通业务源码变化 | 重开应用 | 普通 PowerShell |
 | 依赖或项目安装配置变化 | 重新执行下方安装命令，再检查环境 | 需要环境写权限 |
-| `desktop/package-lock.json` 变化或首次升级 Electron 界面 | 在仓库根依次执行 `npm.cmd ci --prefix desktop` 和 `npm.cmd run setup-runtime --prefix desktop` | 项目目录写权限 |
+| `desktop/package-lock.json` 变化或首次升级 Electron 界面 | 关闭本项目窗口，在仓库根依次执行 `npm.cmd ci --prefix desktop` 和 `npm.cmd run setup-runtime --prefix desktop`，然后重开应用 | 项目目录写权限 |
+| Electron 进程名称或默认图标变化 | 关闭本项目窗口，在仓库根执行 `npm.cmd run setup-runtime --prefix desktop`，然后重开应用 | 项目目录写权限 |
 | 启动器实现或嵌入图标变化 | 按构建说明生成并验证新 EXE | 安装构建依赖时按环境权限；构建本身通常普通窗口即可 |
 | 移动了整个仓库目录 | 在新目录重新执行 editable 安装，使环境指向新源码 | 需要环境写权限 |
 

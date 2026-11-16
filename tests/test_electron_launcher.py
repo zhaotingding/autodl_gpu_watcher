@@ -14,11 +14,12 @@ class ElectronLauncherTest(unittest.TestCase):
     def test_selected_python_and_data_root_reach_electron_without_foreign_python_path(self):
         with tempfile.TemporaryDirectory() as directory:
             checkout = Path(directory)
-            runtime = checkout / "desktop/node_modules/electron/dist/electron.exe"
+            runtime = checkout / "desktop/node_modules/electron/dist/autodl-watcher-desktop.exe"
             runtime.parent.mkdir(parents=True)
             runtime.touch()
             data = checkout / "personal"
             with patch.object(electron_launcher, "source_root", return_value=checkout), \
+                 patch.object(electron_launcher.sys, "platform", "win32"), \
                  patch.object(launcher, "project_python", return_value="C:/project-env/python.exe"), \
                  patch.dict(os.environ, {"AUTODL_APP_ROOT": str(data), "PYTHONHOME": "foreign", "ELECTRON_RUN_AS_NODE": "1"}), \
                  patch.object(electron_launcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
@@ -33,20 +34,26 @@ class ElectronLauncherTest(unittest.TestCase):
             self.assertNotIn("ELECTRON_RUN_AS_NODE", environment)
 
     def test_missing_runtime_reports_repo_install_command_without_spawning(self):
-        with tempfile.TemporaryDirectory() as directory, \
-             patch.object(electron_launcher, "source_root", return_value=Path(directory)), \
-             patch.object(electron_launcher.subprocess, "run") as run:
-            with self.assertRaisesRegex(RuntimeError, "npm.cmd ci --prefix desktop"):
-                electron_launcher.launch()
-            run.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            stock_runtime = checkout / "desktop/node_modules/electron/dist/electron.exe"
+            stock_runtime.parent.mkdir(parents=True)
+            stock_runtime.touch()
+            with patch.object(electron_launcher, "source_root", return_value=checkout), \
+                 patch.object(electron_launcher.sys, "platform", "win32"), \
+                 patch.object(electron_launcher.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "npm.cmd run setup-runtime --prefix desktop"):
+                    electron_launcher.launch()
+                run.assert_not_called()
 
     def test_electron_failure_is_not_reported_as_successful_source_start(self):
         with tempfile.TemporaryDirectory() as directory:
             checkout = Path(directory)
-            runtime = checkout / "desktop/node_modules/electron/dist/electron.exe"
+            runtime = checkout / "desktop/node_modules/electron/dist/autodl-watcher-desktop.exe"
             runtime.parent.mkdir(parents=True)
             runtime.touch()
             with patch.object(electron_launcher, "source_root", return_value=checkout), \
+                 patch.object(electron_launcher.sys, "platform", "win32"), \
                  patch.object(electron_launcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)):
                 with self.assertRaisesRegex(RuntimeError, "状态码3"):
                     electron_launcher.launch()

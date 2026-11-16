@@ -31,7 +31,54 @@ let shutdown = false
 let selectedIcon = null
 let selectedShortcut = null
 let backendFailure = ''
+let applicationVersion = ''
 const pending = new Map()
+
+function titleBar(theme) {
+  return theme === 'light'
+    ? { color: '#ececec', symbolColor: '#242424', height: 44 }
+    : { color: '#242424', symbolColor: '#dedede', height: 44 }
+}
+
+function popupMenu(name, position) {
+  const navigate = page => emit('navigate', { page })
+  const menus = {
+    file: [
+      { label: '全局设置', accelerator: 'CmdOrCtrl+,', click: () => navigate('settings') },
+      { label: '打开资料目录', click: () => { void shell.openPath(dataRoot) } },
+      { type: 'separator' },
+      { label: '退出', accelerator: 'Alt+F4', click: () => window.close() },
+    ],
+    edit: [
+      { label: '撤销', role: 'undo' }, { label: '重做', role: 'redo' }, { type: 'separator' },
+      { label: '剪切', role: 'cut' }, { label: '复制', role: 'copy' }, { label: '粘贴', role: 'paste' },
+      { type: 'separator' }, { label: '全选', role: 'selectAll' },
+    ],
+    view: [
+      { label: 'AutoDL 平台', click: () => navigate('platform') },
+      { label: '网络连接详情', click: () => navigate('network') },
+      { label: '切换深浅主题', click: () => emit('toggle-theme', {}) },
+      { type: 'separator' },
+      { label: '放大', role: 'zoomIn' }, { label: '缩小', role: 'zoomOut' },
+      { label: '实际大小', role: 'resetZoom' }, { label: '全屏', role: 'togglefullscreen' },
+    ],
+    help: [
+      { label: '使用说明', click: () => { void shell.openPath(path.join(projectRoot, 'README.md')) } },
+      { label: '关于 Auto算力与训练调度', click: () => {
+        void dialog.showMessageBox(window, { type: 'info', title: '关于', message: 'Auto算力与训练调度',
+          detail: '版本 ' + applicationVersion + '\nElectron界面 · Python监控后台' })
+      } },
+    ],
+  }
+  if (!Object.hasOwn(menus, name)) throw new Error('未知菜单。')
+  const [width, height] = window.getContentSize()
+  const x = Number.isFinite(position.x) ? Math.max(0, Math.min(width, Math.round(position.x))) : 12
+  const y = Number.isFinite(position.y) ? Math.max(0, Math.min(height, Math.round(position.y))) : 44
+  return new Promise(resolve => {
+    const menu = Menu.buildFromTemplate(menus[name])
+    menu.popup({ window, x, y, callback: () => resolve(true) })
+  })
+}
 
 function emit(event, data) {
   if (window && !window.isDestroyed()) window.webContents.send('watcher:event', { event, data })
@@ -160,9 +207,11 @@ async function invoke(event, method, params) {
   if (method === 'desktop.theme') {
     if (!['dark', 'light'].includes(params.theme)) throw new Error('主题参数无效。')
     nativeTheme.themeSource = params.theme
-    window.setBackgroundColor(params.theme === 'light' ? '#eceef1' : '#181c23')
+    window.setBackgroundColor(params.theme === 'light' ? '#fafafa' : '#1b1b1b')
+    window.setTitleBarOverlay(titleBar(params.theme))
     return true
   }
+  if (method === 'desktop.menu') return popupMenu(params.menu, params)
   if (method === 'desktop.openExternal') {
     const target = new URL(params.url)
     if (target.protocol !== 'https:') throw new Error('外部链接须使用HTTPS。')
@@ -226,10 +275,12 @@ if (!app.requestSingleInstanceLock()) {
     app.setAppUserModelId('AutoDL.GPUWatcher')
     startBackend()
     const state = await backend('snapshot')
+    applicationVersion = state.app.version
     nativeTheme.themeSource = state.theme === 'light' ? 'light' : 'dark'
     window = new BrowserWindow({ title: 'Auto算力与训练调度', width: 1440, height: 900,
       minWidth: 860, minHeight: 660, icon: state.icon?.path || path.join(projectRoot, 'src', 'autodl_watcher', 'default.ico'),
-      backgroundColor: state.theme === 'light' ? '#eceef1' : '#181c23',
+      backgroundColor: state.theme === 'light' ? '#fafafa' : '#1b1b1b',
+      titleBarStyle: 'hidden', titleBarOverlay: titleBar(state.theme),
       show: false,
       // 禁用Chromium拼写检查，避免为模型ID、日志和代码输入自动下载英语词典。
       webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false,

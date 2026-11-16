@@ -571,11 +571,29 @@ document.addEventListener("input", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  const menu = event.altKey && !event.ctrlKey && !event.metaKey
+    ? { f: "file", e: "edit", v: "view", h: "help" }[event.key.toLowerCase()] : null;
+  if (menu) {
+    event.preventDefault();
+    $("#app-menu-" + menu).click();
+    return;
+  }
   if (event.target.dataset.networkId && ["Enter", " "].includes(event.key)) {
     event.preventDefault();
     event.target.click();
   }
 });
+for (const trigger of document.querySelectorAll(".titlebar-menu")) {
+  trigger.addEventListener("mousedown", (event) => event.preventDefault()); // 保留编辑框焦点，让原生复制、粘贴和撤销作用于当前输入。
+  trigger.addEventListener("click", async () => {
+    const bounds = trigger.getBoundingClientRect();
+    trigger.setAttribute("aria-expanded", "true");
+    try {
+      await call("desktop.menu", { menu: trigger.dataset.menu, x: Math.round(bounds.left), y: Math.round(bounds.bottom) });
+    } catch (_) { /* 原生菜单失败沿用统一错误反馈。 */ }
+    finally { trigger.setAttribute("aria-expanded", "false"); }
+  });
+}
 $("#settings-nav").addEventListener("click", () => navigate("settings"));
 $("#network-nav").addEventListener("click", () => navigate("network"));
 $("#dialog-close").addEventListener("click", () => $("#detail-dialog").close());
@@ -597,6 +615,10 @@ if (!api) {
   api.onEvent((event) => {
     const name = event.event || event.type;
     const message = event.data?.message || event.message;
+    if (name === "navigate" && ["platform", "network", "settings"].includes(event.data?.page)) {
+      navigate(event.data.page);
+    }
+    if (name === "toggle-theme") $("#theme-toggle").click();
     if (name === "closing") {
       state.desktopClosing = true;
       state.desktopMessage = message || "正在停止采集并等待 AI 用量入账，请稍候…";

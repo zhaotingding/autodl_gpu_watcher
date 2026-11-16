@@ -7,7 +7,8 @@ const { spawn, spawnSync } = require('node:child_process')
 
 const root = path.resolve(__dirname, '..')
 const desktop = path.join(root, 'desktop')
-const runtime = path.join(desktop, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron')
+const runtime = path.join(desktop, 'node_modules', 'electron', 'dist',
+  process.platform === 'win32' ? 'autodl-watcher-desktop.exe' : 'electron')
 
 // 旧系统Node缺少WebSocket时，仅测试驱动使用本项目Electron内置Node。
 if (typeof WebSocket === 'undefined') {
@@ -127,7 +128,7 @@ async function run() {
       }
       return response.result.result.value
     }
-    await wait(() => evaluate("typeof window.watcher?.invoke === 'function' && document.body.innerText.includes('Auto')"), '桌面界面与preload未就绪。')
+    await wait(() => evaluate("typeof window.watcher?.invoke === 'function' && !!document.body?.innerText.includes('Auto')"), '桌面界面与preload未就绪。')
     assert.equal(await evaluate('typeof require'), 'undefined')
     assert.equal(await evaluate('typeof process'), 'undefined')
     let state = await evaluate("window.watcher.invoke('snapshot')")
@@ -138,11 +139,74 @@ async function run() {
     assert.equal(path.normalize(state.app.python), path.normalize(python))
     assert.equal(path.normalize(state.app.root), path.normalize(isolated))
 
+    // 核对客户区中的标题栏、菜单和原生控制区几何，避免仅靠保存主题判断显示正确。
+    const chromeLayout = async theme => {
+      const layout = await evaluate(`(() => {
+        const header = document.querySelector('.app-titlebar')
+        const menus = [...document.querySelectorAll('.titlebar-menu')]
+        const bounds = header.getBoundingClientRect()
+        const controls = navigator.windowControlsOverlay
+        const area = controls?.getTitlebarAreaRect()
+        return {height:bounds.height, top:bounds.top, background:getComputedStyle(document.body).backgroundColor,
+          header:getComputedStyle(header).backgroundColor, drag:getComputedStyle(header).webkitAppRegion,
+          menus:menus.map(item=>({text:item.textContent.trim(),right:item.getBoundingClientRect().right,
+            drag:getComputedStyle(item).webkitAppRegion})), overlay:!!controls?.visible,
+          availableRight:area ? area.x+area.width : null, sidebarTop:document.querySelector('.sidebar').getBoundingClientRect().top}
+      })()`)
+      assert.equal(layout.height, 44, JSON.stringify(layout))
+      assert.equal(layout.top, 0)
+      assert.equal(layout.sidebarTop, 44)
+      assert.equal(layout.drag, 'drag')
+      assert.deepEqual(layout.menus.map(item => item.text), ['文件', '编辑', '视图', '帮助'])
+      assert.ok(layout.menus.every(item => item.drag === 'no-drag'))
+      assert.equal(layout.background, theme === 'dark' ? 'rgb(27, 27, 27)' : 'rgb(250, 250, 250)')
+      assert.equal(layout.header, theme === 'dark' ? 'rgb(36, 36, 36)' : 'rgb(236, 236, 236)')
+      if (process.platform === 'win32') {
+        assert.equal(layout.overlay, true, '原生窗口控制未叠加到主题标题栏。')
+        assert.ok(layout.menus.every(item => item.right < layout.availableRight), JSON.stringify(layout))
+      }
+    }
+    await chromeLayout('dark')
+    let chromePid
+    const captureChrome = (filename, cancelMenu = false) => {
+      const result = spawnSync(python, ['-s', path.join(__dirname, 'electron_window_capture.py'), String(chromePid),
+        path.join(isolated, filename), ...(cancelMenu ? ['--cancel-menu'] : [])], {env, encoding:'utf8', windowsHide:true})
+      assert.equal(result.status, 0, result.stderr || result.stdout)
+      return JSON.parse(result.stdout.trim())
+    }
+    if (process.platform === 'win32') {
+      const connections = await evaluate("window.watcher.invoke('network.snapshot')")
+      chromePid = connections.entries.find(item => item.state === 'LISTEN' && item.local_port === Number(port))?.pid
+      assert.ok(chromePid, '未能从本实例系统连接表确认测试窗口PID。')
+      const colors = captureChrome('window-dark.png')
+      assert.deepEqual(colors.header_pixel.slice(0, 3), [36, 36, 36], JSON.stringify(colors))
+      assert.deepEqual(colors.controls_pixel.slice(0, 3), [36, 36, 36], JSON.stringify(colors))
+      await evaluate("document.querySelector('#app-menu-file').click()")
+      await wait(() => evaluate("document.querySelector('#app-menu-file').getAttribute('aria-expanded')==='true'"), '文件菜单未响应点击。')
+      await pause(150)
+      captureChrome('window-file-menu.png', true)
+      await wait(() => evaluate("document.querySelector('#app-menu-file').getAttribute('aria-expanded')==='false'"), '文件菜单取消后未恢复按钮状态。')
+    }
+
     // 从实际设置控件走保存链路，再读取Python状态及磁盘YAML。
     await evaluate("document.querySelector('#settings-nav').click()")
     await wait(() => evaluate("!!document.querySelector('#monitor-form')"), '监控设置未打开。')
+    if (process.platform === 'win32') {
+      await evaluate("(() => { const input=document.querySelector('#monitor-user'); input.focus(); input.setSelectionRange(0,input.value.length); const button=document.querySelector('#app-menu-edit'); button.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true})); button.click(); })()")
+      await wait(() => evaluate("document.querySelector('#app-menu-edit').getAttribute('aria-expanded')==='true'"), '编辑菜单未响应点击。')
+      await pause(150)
+      captureChrome('window-edit-menu.png', true)
+      await wait(() => evaluate("document.querySelector('#app-menu-edit').getAttribute('aria-expanded')==='false'"), '编辑菜单取消后未恢复按钮状态。')
+      assert.equal(await evaluate("document.activeElement.id"), 'monitor-user', '打开编辑菜单丢失了原输入框焦点。')
+    }
     await evaluate("(() => { const theme=document.querySelector('#theme-choice'); theme.value='light'; theme.dispatchEvent(new Event('change',{bubbles:true})); })()")
     await wait(() => evaluate("window.watcher.invoke('snapshot').then(s=>s.theme==='light' && document.documentElement.dataset.theme==='light')"), '主题控件未保存并应用浅色。')
+    await chromeLayout('light')
+    if (process.platform === 'win32') {
+      const colors = captureChrome('window-light.png')
+      assert.deepEqual(colors.header_pixel.slice(0, 3), [236, 236, 236], JSON.stringify(colors))
+      assert.deepEqual(colors.controls_pixel.slice(0, 3), [236, 236, 236], JSON.stringify(colors))
+    }
     await evaluate("(() => { document.querySelector('#monitor-user').value='界面验收用户'; document.querySelector('#monitor-form').requestSubmit(); })()")
     await wait(() => evaluate("window.watcher.invoke('snapshot').then(s=>s.preferences.user==='界面验收用户')"), '监控设置表单未保存。')
     state = await evaluate("window.watcher.invoke('snapshot')")
@@ -198,6 +262,7 @@ async function run() {
 
     await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 660, deviceScaleFactor: 1, mobile: false })
     assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true)
+    await chromeLayout('light')
     await send('Emulation.clearDeviceMetricsOverride')
     if (process.argv.includes('--screenshots')) {
       const capture = async filename => {

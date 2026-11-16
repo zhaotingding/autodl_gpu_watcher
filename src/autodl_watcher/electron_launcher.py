@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 
@@ -16,11 +15,14 @@ def launch(arguments=()):
     if checkout is None:
         raise RuntimeError("Electron界面需要项目源码。请克隆仓库，在项目Conda环境安装并按README启动。")
     desktop = checkout / "desktop"
-    executable = desktop / "node_modules/electron/dist" / (
-        "electron.exe" if os.name == "nt" else "Electron.app/Contents/MacOS/Electron" if sys.platform == "darwin" else "electron")
+    runtime_name = {
+        "win32": "autodl-watcher-desktop.exe",
+        "darwin": "Electron.app/Contents/MacOS/Electron",
+    }.get(sys.platform, "electron")
+    executable = desktop / "node_modules/electron/dist" / runtime_name
     if not executable.is_file():
-        raise RuntimeError("缺少本项目Electron运行时。请在仓库根的PowerShell依次执行 npm.cmd ci --prefix desktop "
-                           "和 npm.cmd run setup-runtime --prefix desktop，然后重新打开程序。")
+        raise RuntimeError("缺少本项目Electron运行时。请在仓库根的PowerShell执行 npm.cmd run setup-runtime --prefix desktop。"
+                           "如果还未安装界面依赖，请先执行 npm.cmd ci --prefix desktop。")
     environment = child_environment()
     environment.update(AUTODL_PYTHON=project_python(), PYTHONIOENCODING="utf-8")
     environment.pop("ELECTRON_RUN_AS_NODE", None)

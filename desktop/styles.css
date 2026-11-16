@@ -1,36 +1,40 @@
 :root{
   color-scheme:dark;
-  --bg:#11171d;
-  --sidebar:#151d25;
-  --surface:#1a232d;
-  --raised:#202c38;
-  --field:#111a23;
-  --line:#2b3b4a;
-  --text:#e4edf4;
-  --muted:#9bafbf;
-  --accent:#63d9b3;
-  --accent-bg:#123b33;
-  --blue:#83bbfa;
+  --bg:#1b1b1b;
+  --sidebar:#202020;
+  --surface:#222222;
+  --raised:#2b2b2b;
+  --field:#1b1b1b;
+  --line:#353535;
+  --text:#e6e6e6;
+  --muted:#aaaaaa;
+  --accent:#8fbcff;
+  --accent-bg:#343434;
+  --blue:#8fbcff;
+  --success:#57da8c;
+  --titlebar:#242424;
   --warning:#efca79;
-  --error:#ff9398;
+  --error:#ffb5ae;
   --shadow:0 18px 70px #0007
 }
 :root[data-theme="light"]{
   color-scheme:light;
-  --bg:#f2f5f7;
-  --sidebar:#e8eef2;
-  --surface:#fff;
-  --raised:#edf2f6;
-  --field:#f7f9fb;
-  --line:#cfdae2;
-  --text:#1e3445;
-  --muted:#536b7d;
-  --accent:#087351;
-  --accent-bg:#d9f1e7;
-  --blue:#225ea1;
+  --bg:#fafafa;
+  --sidebar:#eeeeee;
+  --surface:#f4f4f4;
+  --raised:#ebebeb;
+  --field:#ffffff;
+  --line:#d7d7d7;
+  --text:#242424;
+  --muted:#5a5a5a;
+  --accent:#1558a6;
+  --accent-bg:#e3e3e3;
+  --blue:#1558a6;
+  --success:#147d41;
+  --titlebar:#ececec;
   --warning:#916000;
-  --error:#b6293c;
-  --shadow:0 18px 70px #18344425
+  --error:#a52c29;
+  --shadow:0 18px 70px #0002
 }
 *{
   box-sizing:border-box
@@ -42,9 +46,58 @@ html,body{
 }
 body{
   display:flex;
+  padding-top:44px;
   background:var(--bg);
   color:var(--text);
   font:13px/1.55 "Segoe UI","Microsoft YaHei UI",sans-serif
+}
+.app-titlebar{
+  position:fixed;
+  inset:0 0 auto;
+  height:44px;
+  display:flex;
+  align-items:center;
+  padding-left:8px;
+  padding-right:calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 142px)) + 6px);
+  background:var(--titlebar);
+  border-bottom:1px solid var(--line);
+  z-index:20;
+  -webkit-app-region:drag;
+  user-select:none
+}
+.titlebar-menus{
+  display:flex;
+  align-items:center;
+  gap:3px;
+  height:100%;
+  -webkit-app-region:no-drag
+}
+.titlebar-menu{
+  min-width:54px;
+  min-height:34px;
+  padding:3px 10px;
+  border:1px solid transparent;
+  border-radius:4px;
+  color:var(--text);
+  background:transparent;
+  font-size:13px;
+  -webkit-app-region:no-drag
+}
+.titlebar-menu:hover,.titlebar-menu[aria-expanded="true"]{
+  background:var(--raised);
+  border-color:transparent
+}
+.titlebar-title{
+  position:absolute;
+  left:50%;
+  transform:translateX(-50%);
+  max-width:calc(100% - 560px);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  pointer-events:none;
+  color:var(--muted);
+  font-size:12px
 }
 button,input,select,textarea{
   font:inherit
@@ -67,9 +120,9 @@ button:disabled{
   cursor:default
 }
 button.primary{
-  background:var(--accent);
-  color:var(--bg);
-  border-color:var(--accent);
+  background:var(--raised);
+  color:var(--text);
+  border-color:var(--line);
   font-weight:600
 }
 button.danger{
@@ -168,9 +221,9 @@ a{
   width:35px;
   height:35px;
   flex-shrink:0;
-  background:var(--accent-bg);
-  color:var(--accent);
-  border:1px solid var(--accent);
+  background:var(--raised);
+  color:var(--text);
+  border:1px solid var(--line);
   border-radius:9px;
   font-size:23px
 }
@@ -195,7 +248,7 @@ a{
   word-break:break-word
 }
 .nav-item.active{
-  color:var(--accent);
+  color:var(--text);
   background:var(--accent-bg);
   font-weight:600
 }
@@ -207,8 +260,7 @@ a{
   background:var(--muted)
 }
 .nav-item .dot.running{
-  background:var(--accent);
-  box-shadow:0 0 0 3px #63d9b314
+  background:var(--success)
 }
 .nav-divider{
   margin:15px 8px 8px;
@@ -235,7 +287,7 @@ a{
 .connection-state::before{
   content:"";
   display:block;
-  background:var(--accent);
+  background:var(--success);
   width:5px;
   height:5px;
   border-radius:50%
@@ -334,7 +386,7 @@ a{
   display:inline-block
 }
 .inline-status.success .signal{
-  background:var(--accent)
+  background:var(--success)
 }
 .inline-status.error .signal{
   background:var(--error)
@@ -349,7 +401,7 @@ a{
   color:var(--warning)
 }
 .inline-status.success{
-  color:var(--accent)
+  color:var(--success)
 }
 .panel{
   background:var(--surface);
@@ -499,7 +551,7 @@ tr.server-row td{
 }
 .terminal{
   background:var(--field);
-  color:#a7ddc9;
+  color:var(--text);
   min-height:205px;
   max-height:350px;
   overflow:auto;
@@ -513,7 +565,7 @@ tr.server-row td{
   color:var(--error)
 }
 .log-line.success{
-  color:var(--accent)
+  color:var(--success)
 }
 .training-output{
   height:250px;
@@ -538,7 +590,7 @@ tr.server-row td{
 }
 .task-card{
   border:1px solid var(--line);
-  border-left:3px solid var(--accent);
+  border-left:3px solid var(--success);
   border-radius:8px;
   background:var(--surface);
   overflow:hidden
@@ -559,7 +611,7 @@ tr.server-row td{
   word-break:break-word
 }
 .task-status{
-  color:var(--accent);
+  color:var(--success);
   font-size:11px
 }
 .task-card.warning .task-status{
@@ -774,7 +826,7 @@ tr.server-row td{
   box-shadow:var(--shadow)
 }
 .detail-dialog::backdrop{
-  background:#071019b3
+  background:#0009
 }
 .dialog-heading{
   display:flex;
@@ -1010,6 +1062,9 @@ body.closing .page{
 .wrap-pre{
   white-space:pre-wrap;
   overflow-wrap:anywhere
+}
+.titlebar-menu{
+  position:relative
 }
 .terminal{
   color:var(--text)

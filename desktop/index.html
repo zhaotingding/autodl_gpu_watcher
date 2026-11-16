@@ -9,6 +9,15 @@
   <script src="renderer.js" defer></script>
 </head>
 <body>
+  <header class="app-titlebar">
+    <nav class="titlebar-menus" aria-label="应用菜单">
+      <button id="app-menu-file" class="titlebar-menu" type="button" data-menu="file" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+F">文件</button>
+      <button id="app-menu-edit" class="titlebar-menu" type="button" data-menu="edit" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+E">编辑</button>
+      <button id="app-menu-view" class="titlebar-menu" type="button" data-menu="view" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+V">视图</button>
+      <button id="app-menu-help" class="titlebar-menu" type="button" data-menu="help" aria-haspopup="menu" aria-expanded="false" aria-keyshortcuts="Alt+H">帮助</button>
+    </nav>
+    <span class="titlebar-title">Auto算力与训练调度</span>
+  </header>
   <aside class="sidebar">
     <div class="brand"><span class="brand-mark" aria-hidden="true">A</span><div>Auto 算力<span>训练与资源调度</span></div></div>
     <div class="nav-section">工作区</div>
