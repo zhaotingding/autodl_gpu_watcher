@@ -1,5 +1,5 @@
 ﻿[CmdletBinding()]
-param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Stage, [switch]$ResumeMigration)
+param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Stage, [switch]$ResumeMigration, [switch]$RefreshRegistrationCase, [switch]$RepairRegistrationCase, [switch]$ExplorerLaunch)
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $allowed = Join-Path $repo 'installer\dist\verification'
@@ -98,13 +98,79 @@ function Next-Page($page) {
     if (-not $button -or -not [AutoDLWizard]::IsWindowEnabled($button)) { throw '安装继续按钮不可用' }
     [void][AutoDLWizard]::PostMessage($page.Root,0x111,[IntPtr]1,$button)
 }
-function Install-Interactively([string]$Chosen, [bool]$Existing, [bool]$Relocate) {
-    $task = Start-Process -FilePath $packagePath -WindowStyle Hidden -PassThru
+function Save-TestRegistration {
+    # 只保存独立验收身份的两个确切键和值类型，正式产品登记始终不在操作范围内。
+    $guid = '0abb133a-f2ee-5c74-b299-9b011ef42d4f'
+    $rows = Installed-Entries
+    if ($rows.Count -ne 1 -or $rows[0].PSChildName -ne $guid -or
+        $rows[0].DisplayIcon -ne ((Join-Path $from $exeName) + ',0')) { throw '登记刷新回归只允许本轮A目录的独立测试身份' }
+    foreach ($name in @("Software\$guid", "Software\Microsoft\Windows\CurrentVersion\Uninstall\$guid")) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($name)
+        if (-not $key) { throw "测试登记缺失 $name" }
+        try {
+            if ($key.SubKeyCount) { throw '测试登记含未预期子键，停止此回归' }
+            if ($name -eq "Software\$guid" -and $key.GetValue('InstallLocation') -ne $from) { throw '测试原程序位置不符' }
+            $values = @($key.GetValueNames() | ForEach-Object {
+                [pscustomobject]@{ Name=$_; Kind=$key.GetValueKind($_)
+                    Value=$key.GetValue($_,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+            })
+            [pscustomobject]@{ Name=$name; Values=$values }
+        } finally {
+            $key.Dispose()
+        }
+    }
+}
+function Restore-TestRegistration($Backup) {
+    foreach ($entry in $Backup) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($entry.Name)
+        try {
+            foreach ($value in $entry.Values) { $key.SetValue($value.Name,$value.Value,$value.Kind) }
+        } finally {
+            $key.Dispose()
+        }
+    }
+}
+function Install-Interactively([string]$Chosen, [bool]$Existing, [bool]$Relocate, [bool]$RefreshRegistration = $false, [bool]$MissingRegistration = $false) {
+    $task = $null
+    $registrationHidden = $false
+    $registration = @()
     try {
+        if ($RefreshRegistration -or $MissingRegistration) {
+            $registration = @(Save-TestRegistration)
+            # 刷新场景在目录页恢复，修复场景由安装器重新创建完整登记。
+            $registrationHidden = $true
+            foreach ($entry in $registration) { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($entry.Name) }
+        }
+        if ($ExplorerLaunch) {
+            # 通过真实Explorer启动，覆盖用户双击入口与PowerShell启动的差异。
+            $installerName = [IO.Path]::GetFileNameWithoutExtension($packagePath)
+            $previousIds = @(Get-Process -Name $installerName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+            $shell = New-Object -ComObject Shell.Application
+            $browser = $shell.Windows() | Where-Object { $_.FullName -like '*\explorer.exe' } | Select-Object -First 1
+            if (-not $browser) { throw 'Explorer入口验收需要一个已打开的资源管理器窗口' }
+            $browser.Document.Application.ShellExecute($packagePath,'',(Split-Path $packagePath),'open',1)
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (-not $task -and [DateTime]::UtcNow -lt $deadline) {
+                $task = Get-Process -Name $installerName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Id -notin $previousIds -and $_.Path -eq $packagePath } | Select-Object -First 1
+                if (-not $task) { Start-Sleep -Milliseconds 100 }
+            }
+            if (-not $task) { throw 'Explorer未启动本轮测试安装器' }
+            # Get-Process取得的实例需提前持有句柄，才能在进程退出后读取真实退出码。
+            [void]$task.Handle
+            $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($task.Id)"
+            if ((Get-Process -Id $parent.ParentProcessId).ProcessName -ne 'explorer') { throw '未通过实际Explorer进程启动' }
+        } else {
+            $task = Start-Process -FilePath $packagePath -WindowStyle Hidden -PassThru
+        }
         $page = Wait-Control $task { param($h) [AutoDLWizard]::Class($h) -eq 'Edit' -and [AutoDLWizard]::GetDlgCtrlID($h) -eq 1019 } '程序目录页'
+        if ($registrationHidden -and -not $MissingRegistration) {
+            Restore-TestRegistration $registration
+            $registrationHidden = $false
+        }
         $browse = @($page.Children | Where-Object { [AutoDLWizard]::GetDlgCtrlID($_) -eq 1001 })
         if ($browse.Count -ne 1 -or -not [AutoDLWizard]::IsWindowEnabled($browse[0])) { throw '浏览按钮不可用' }
-        if ($Existing -and [AutoDLWizard]::Text($page.Control) -ne $from) { throw '覆盖安装未预填已登记目录' }
+        if ($Existing -and -not $RefreshRegistration -and -not $MissingRegistration -and [AutoDLWizard]::Text($page.Control) -ne $from) { throw '覆盖安装未预填已登记目录' }
         # 打开真实目录浏览窗口，再取消并在目录输入框选择尚不存在的新路径。
         [void][AutoDLWizard]::PostMessage($page.Root,0x111,[IntPtr]1001,$browse[0])
         $picker = Wait-Control $task { param($h) [AutoDLWizard]::Class($h) -eq 'SysTreeView32' } '浏览目录窗口'
@@ -130,9 +196,14 @@ function Install-Interactively([string]$Chosen, [bool]$Existing, [bool]$Relocate
         if (-not $task.WaitForExit(30000) -or $task.ExitCode -ne 0) { throw "安装器未正常完成，退出码$($task.ExitCode)" }
         $rows = Installed-Entries
         if ($rows.Count -ne 1 -or $rows[0].DisplayIcon -ne ((Join-Path $Chosen $exeName) + ',0')) { throw '程序路径或安装登记不唯一' }
+        $registrationHidden = $false
         Write-Output "交互安装通过，程序路径$Chosen"
     } finally {
-        if (-not $task.HasExited) { Stop-Process -Id $task.Id }
+        try {
+            if ($task -and -not $task.HasExited) { Stop-Process -Id $task.Id }
+        } finally {
+            if ($registrationHidden) { Restore-TestRegistration $registration }
+        }
     }
 }
 
@@ -142,6 +213,14 @@ try {
     if (-not $ResumeMigration) {
         Install-Interactively $from $false $false
         Install-Interactively $from $true $false
+    }
+    if ($RefreshRegistrationCase) {
+        Install-Interactively ($from + '\') $true $false $true
+        Write-Output '初始化原目录状态为空后，目录页重新识别登记并原位覆盖通过。'
+    }
+    if ($RepairRegistrationCase) {
+        Install-Interactively ($from + '\') $true $false $false $true
+        Write-Output '安装登记全程缺失时，识别已有本应用目录并完成修复安装、重新创建登记通过。'
     }
     Install-Interactively $to $true $true
     if (Test-Path -LiteralPath (Join-Path $from $exeName)) { throw '迁移后原程序仍在' }

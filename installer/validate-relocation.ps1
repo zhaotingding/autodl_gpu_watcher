@@ -3,7 +3,8 @@
     [string]$NewDirectory,
     [string]$ExecutableName,
     [string]$UninstallCommand,
-    [switch]$FromEnvironment
+    [switch]$FromEnvironment,
+    [switch]$Repair
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,16 +51,44 @@ function Test-Overlap([string]$Left, [string]$Right) {
         $Right.StartsWith($Left + '\', $comparison)
 }
 
+function Get-InstalledPackage([string]$Archive) {
+    # 只读asar中的package.json，沿用Electron asar的Pickle头和文件偏移格式。
+    $stream = [IO.File]::OpenRead($Archive)
+    $reader = [IO.BinaryReader]::new($stream)
+    try {
+        if ($reader.ReadUInt32() -ne 4) { throw '现有程序的asar头无效。' }
+        $headerSize = $reader.ReadUInt32()
+        $payloadSize = $reader.ReadUInt32()
+        $jsonSize = $reader.ReadUInt32()
+        if ($headerSize -lt 8 -or $headerSize -gt 16777216 -or $headerSize + 8 -gt $stream.Length -or
+            $payloadSize -ne $headerSize - 4 -or $jsonSize + 8 -gt $headerSize) {
+            throw '现有程序的asar头不完整。'
+        }
+        $header = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString($reader.ReadBytes($jsonSize)))
+        $entry = $header.files.'package.json'
+        if (-not $entry -or $entry.unpacked -or $entry.link -or $entry.offset -notmatch '^\d+$' -or
+            $entry.size -le 0 -or $entry.size -gt 1048576) { throw '现有程序缺少可识别的安装元数据。' }
+        $position = 8 + [long]$headerSize + [long]$entry.offset
+        if ($position + $entry.size -gt $stream.Length) { throw '现有程序的安装元数据不完整。' }
+        $stream.Position = $position
+        ConvertFrom-Json ([Text.Encoding]::UTF8.GetString($reader.ReadBytes($entry.size)))
+    } finally {
+        $reader.Dispose()
+    }
+}
+
 try {
     $profileName = switch ($ExecutableName) {
         'autodl-desktop.exe' { 'autodl-watcher' }
         'autodl-update-test.exe' { 'autodl-watcher-update-test' }
         default { throw '无法识别现有安装的产品身份。' }
     }
-    if ($UninstallCommand -notmatch '^"([^"\r\n]+)"(?:\s+/currentuser)?\s*$') {
-        throw '原卸载登记无效，无法安全迁移。'
+    if (-not $Repair) {
+        if ($UninstallCommand -notmatch '^"([^"\r\n]+)"(?:\s+/currentuser)?\s*$') {
+            throw '原卸载登记无效，无法安全迁移。'
+        }
+        $registeredUninstaller = $Matches[1]
     }
-    $registeredUninstaller = $Matches[1]
     Add-Type -TypeDefinition @'
 using System;
 using System.IO;
@@ -91,7 +120,9 @@ public static class AutodlRelocationLocation {
 
     $old = Get-CheckedLocation $OldDirectory '原程序目录'
     $new = Get-CheckedLocation $NewDirectory '新程序目录'
-    if (Test-Overlap $old.Key $new.Key) { throw '新程序目录必须与原程序目录分开。' }
+    if ($Repair) {
+        if (-not $old.Key.Equals($new.Key, [StringComparison]::OrdinalIgnoreCase)) { throw '修复安装必须使用同一个原程序目录。' }
+    } elseif (Test-Overlap $old.Key $new.Key) { throw '新程序目录必须与原程序目录分开。' }
     if (-not (Test-Path -LiteralPath $old.Full -PathType Container)) { throw '原程序目录不存在。' }
     if ($old.Full -eq [IO.Path]::GetPathRoot($OldDirectory).TrimEnd('\') -or
         $new.Full -eq [IO.Path]::GetPathRoot($NewDirectory).TrimEnd('\')) {
@@ -99,13 +130,31 @@ public static class AutodlRelocationLocation {
     }
 
     $expectedUninstaller = Join-Path $old.Full "Uninstall $ExecutableName"
-    if (-not $registeredUninstaller.Equals($expectedUninstaller, [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $Repair -and -not $registeredUninstaller.Equals($expectedUninstaller, [StringComparison]::OrdinalIgnoreCase)) {
         throw '原卸载登记与原程序目录不一致。'
     }
-    foreach ($file in @($expectedUninstaller, (Join-Path $old.Full $ExecutableName))) {
+    $program = Join-Path $old.Full $ExecutableName
+    $requiredFiles = if ($Repair) { @($program, (Join-Path $old.Full 'resources/app.asar')) }
+        else { @($expectedUninstaller, $program) }
+    foreach ($file in $requiredFiles) {
         $item = Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
         if (-not $item -or $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw '原程序或卸载器不完整，无法安全迁移。'
+        }
+    }
+    if ($Repair) {
+        # 登记缺失时通过本产品的PE身份和随包元数据识别原程序，允许原位修复。
+        $testBuild = $ExecutableName -eq 'autodl-update-test.exe'
+        $product = if ($testBuild) { 'Auto算力与训练调度（更新验收）' } else { 'Auto算力与训练调度' }
+        $name = if ($testBuild) { 'autodl-update-test' } else { 'autodl-watcher-desktop' }
+        $identity = [Diagnostics.FileVersionInfo]::GetVersionInfo($program)
+        if ($identity.ProductName -ne $product -or $identity.FileDescription -ne $product) {
+            throw '所选目录未识别为本应用的已有程序目录，请选择本应用的安装位置。'
+        }
+        $package = Get-InstalledPackage (Join-Path $old.Full 'resources/app.asar')
+        if ($package.name -ne $name -or $package.autodlInstalled -ne $true -or
+            $package.autodlLocalUpdateTest -ne $testBuild) {
+            throw '所选目录未识别为本应用的已有程序目录，请选择本应用的安装位置。'
         }
     }
     foreach ($name in @('.ui', 'runtime', 'config.local.yaml', 'config.yaml')) {
@@ -154,7 +203,7 @@ public static class AutodlRelocationLocation {
         }
     }
 
-    if (Test-Path -LiteralPath $new.Full) {
+    if (-not $Repair -and (Test-Path -LiteralPath $new.Full)) {
         if (Get-ChildItem -LiteralPath $new.Full -Force | Select-Object -First 1) {
             throw '请选择一个新的或空的程序文件夹。'
         }

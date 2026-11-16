@@ -42,7 +42,7 @@
       StrCpy $INSTDIR $AutodlRegisteredInstallDir
       Call AutodlValidateInstallLocation
     ${ElseIf} ${Silent}
-      Call AutodlValidateNewDirectory
+      Call AutodlValidateTargetDirectory
     ${EndIf}
   !macroend
 
@@ -81,7 +81,7 @@
       ; 安装前再次以当前登记判断覆盖或迁移，不沿用进入向导时的空缓存。
       ReadRegStr $AutodlRegisteredInstallDir HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
       ${If} $AutodlRegisteredInstallDir == ""
-        Call AutodlValidateNewDirectory
+        Call AutodlValidateTargetDirectory
         Return
       ${EndIf}
 
@@ -102,8 +102,9 @@
         Return
       ${EndIf}
 
-      Call AutodlValidateNewDirectory
-      Call AutodlValidateRelocation
+      Call AutodlValidateTargetDirectory
+      Push "relocate"
+      Call AutodlValidateProgramDirectory
       MessageBox MB_OKCANCEL|MB_ICONQUESTION|MB_DEFBUTTON2 "将程序迁移到：$\r$\n$INSTDIR$\r$\n$\r$\n旧卸载器会清理原程序目录，个人资料仍保留在原位。继续安装？" /SD IDCANCEL IDOK +2
       Abort
       StrCpy $AutodlRelocating "1"
@@ -189,9 +190,9 @@
       Abort
   FunctionEnd
 
-  Function AutodlValidateNewDirectory
+  Function AutodlValidateTargetDirectory
     Call AutodlValidateInstallLocation
-    ; 新目录或空目录用于首次安装与迁移，已登记目录支持原位覆盖。
+    ; 已有本应用目录支持修复安装，由实际产品文件确认身份。
     ClearErrors
     FindFirst $0 $1 "$INSTDIR\*"
     ${If} ${Errors}
@@ -203,7 +204,9 @@
         ${If} $1 != "."
         ${AndIf} $1 != ".."
           FindClose $0
-          Goto autodlInvalidDirectory
+          Push "repair"
+          Call AutodlValidateProgramDirectory
+          Return
         ${EndIf}
         FindNext $0 $1
         ${If} ${Errors}
@@ -216,7 +219,7 @@
     Return
 
     autodlInvalidDirectory:
-      MessageBox MB_OK|MB_ICONSTOP "请选择一个新的或空的程序文件夹，避免覆盖已有文件。" /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "所选位置不能作为程序目录，请选择有效的程序文件夹。" /SD IDOK
       ${If} ${Silent}
         SetErrorLevel 1
         Quit
@@ -225,7 +228,8 @@
   FunctionEnd
 
   !macro customHeader
-    Function AutodlValidateRelocation
+    Function AutodlValidateProgramDirectory
+      Pop $9
       InitPluginsDir
       File /oname=$PLUGINSDIR\validate-relocation.ps1 "${AUTODL_RELOCATION_SCRIPT}"
       Delete "$PLUGINSDIR\relocation-error.txt"
@@ -234,6 +238,11 @@
       ; 通过当前安装器进程的环境传递原始路径与注册命令，避免命令参数重新解释引号。
       StrCpy $2 "error"
       StrCpy $3 $AutodlRegisteredInstallDir
+      StrCpy $8 ""
+      ${If} $9 == "repair"
+        StrCpy $3 $INSTDIR
+        StrCpy $8 " -Repair"
+      ${EndIf}
       StrCpy $4 $INSTDIR
       System::Call 'kernel32::SetEnvironmentVariableW(w "AUTODL_RELOCATION_OLD_DIRECTORY", w r3) i .r7'
       ${If} $7 == 0
@@ -251,7 +260,7 @@
       ${If} $7 == 0
         Goto autodlRelocationClearEnvironment
       ${EndIf}
-      nsExec::Exec /TIMEOUT=15000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\validate-relocation.ps1" -FromEnvironment'
+      nsExec::Exec /TIMEOUT=15000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\validate-relocation.ps1" -FromEnvironment$8'
       Pop $2
 
       autodlRelocationClearEnvironment:
