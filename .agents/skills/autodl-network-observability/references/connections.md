@@ -1,6 +1,13 @@
 # 实现边界与验证
 
-仅在维护本机网络详情时读取。2026-10-26 核对：以下是源码契约和隔离/回环验证，不代表真实远端连接已验收。
+仅在维护本机网络详情时读取。2026-11-16核对当前默认入口；后文保留2026-10-26／31的源码契约和隔离／回环记录，不代表本轮真实远端验收。
+
+## 当前Electron入口
+
+- `desktop/main.cjs`把主进程PID通过`AUTODL_DESKTOP_PID`交给后台；`desktop_backend.py`以该PID创建`NetworkMonitor`。根身份须覆盖本实例Electron、Python及其实际子进程，不能按名称追踪所有同类进程。
+- `renderer.js`的`network.snapshot`调用进入`DesktopBackend._network_snapshot`；进入网络页、手动刷新及该页开启的三秒刷新才读取系统表，单项在途。普通业务快照和筛选不额外采网络或重连业务。
+- 默认界面定位`desktop_backend.py`与`renderer.js`，验证用`test_desktop_backend.py`和`electron_smoke.cjs`的受影响路径。原生表、归因和未知状态仍复用下文模块及测试；`network_ui.py`与Tk窗口验证仅在`--legacy-tk`适用。
+
 
 ## 原生 API 与进程身份
 
@@ -11,7 +18,7 @@
 
 官方依据：[GetExtendedTcpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable)、[TCP IPv6 owner-PID](https://learn.microsoft.com/en-us/windows/win32/api/tcpmib/ns-tcpmib-mib_tcp6row_owner_pid)、[UDP IPv6 owner-PID](https://learn.microsoft.com/en-us/windows/win32/api/udpmib/ns-udpmib-mib_udp6row_owner_pid)、[PROCESSENTRY32W](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w)、[GetProcessTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)。
 
-## 展示及生命周期
+## 旧Tk展示及生命周期
 
 - 面板打开时每 3 秒读取一次，只有一项在途操作；关闭隐藏并取消定时，重开复用实例。旧代次结果不展示，应用退出销毁定时器；后台不操作 Tk。
 - 当前记录不截断；消失历史最多 300 条、仅存内存。时间为首次/最近观察和未再观察时间，未知时长停在 `last_seen`。短连接可能落在采样间隙，关闭面板不采样。
@@ -32,7 +39,7 @@
 
 2026-10-26 已验证：486 项完整离线回归通过；其中新增真实 Windows 回环核对 TCP/UDP 端点与消失记录。普通执行上下文读取原生快照成功；隔离 Tk 窗口使用明确标注的模拟行核对按钮、表格、筛选及详情显示。没有对在用应用或真实远端业务做新连接验收。Skill 元数据和新增引用已校验，这不证明新会话已自动选用。
 
-实测时分别报告：静态/模拟回归、本机原生回环、隔离界面显示、真实业务观察。源码新增此面板无需重建轻量启动器，现有窗口需用户重开才能加载新代码。
+实测时分别报告：静态/模拟回归、本机原生回环、隔离界面显示、真实业务观察。上述旧源码入口修改无需重建未变动的轻量启动器，现有窗口需重开才能加载新源码；安装版须另走安装构建与版本交付，不能靠重开加载仓库代码。
 
 ## 请求归因证据
 

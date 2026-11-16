@@ -8,12 +8,12 @@
 | --- | --- |
 | AutoDL平台采集、登录判断、Telemetry、占用归属及电源门控 | [autodl-platform-monitoring](.agents/skills/autodl-platform-monitoring/SKILL.md) |
 | SSH采集、训练发现、默认日志进度、显存归属和训练状态 | [autodl-training-monitoring](.agents/skills/autodl-training-monitoring/SKILL.md) |
-| 专用规则、AI设置/请求、Token费用和退出记账 | [autodl-ai-rules](.agents/skills/autodl-ai-rules/SKILL.md) |
+| 训练日志专用规则、AI请求与旧有效规则保留、Token账本和退出收尾 | [autodl-ai-rules](.agents/skills/autodl-ai-rules/SKILL.md) |
 | Windows安装/卸载/更新、源码Conda与轻量EXE、随包worker和图标 | [autodl-windows-build](.agents/skills/autodl-windows-build/SKILL.md) |
-| 本机网络连接详情、进程归属、系统表采集及观察历史 | [autodl-network-observability](.agents/skills/autodl-network-observability/SKILL.md) |
-| 深浅主题、外观YAML、Tk控件配色和窗口切换适配 | [autodl-ui-theme](.agents/skills/autodl-ui-theme/SKILL.md) |
-| Electron界面、preload通信、Python桌面后台及桌面验收 | [autodl-electron-desktop](.agents/skills/autodl-electron-desktop/SKILL.md) |
-| 配置兼容、资料根、个人数据迁移/恢复和历史证据定位 | [autodl-maintenance](.agents/skills/autodl-maintenance/SKILL.md) |
+| Electron／旧Tk网络详情、本机系统表、实例进程归属与请求证据 | [autodl-network-observability](.agents/skills/autodl-network-observability/SKILL.md) |
+| Electron默认界面／旧Tk兼容界面的深浅主题、外观YAML与原生窗口配色 | [autodl-ui-theme](.agents/skills/autodl-ui-theme/SKILL.md) |
+| Electron页面、preload通信、Python桌面桥接及关闭生命周期 | [autodl-electron-desktop](.agents/skills/autodl-electron-desktop/SKILL.md) |
+| 设置兼容、源码／安装版资料根、数据恢复和历史证据定位 | [autodl-maintenance](.agents/skills/autodl-maintenance/SKILL.md) |
 
 按当前任务选读匹配技能；索引不要求全部读取，也没有统一必读总技能。仅在当前步骤需要时读对应references。长期知识按相同触发条件更新或按独立用途拆分，不重建旧笔记入口。
 

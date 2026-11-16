@@ -8,10 +8,10 @@
 
 ## 唯一项目环境与依赖来源
 
-- 依赖唯一来源为 `pyproject.toml`，构建 extra 保留明确固定版本，包版本动态读取源码 `__version__`。不复制已安装环境，不另维护 requirements，也不把作者的 Conda 名称、绝对路径或历史归档变成协作者条件。
+- Python依赖来源为`pyproject.toml`，构建extra保留明确固定版本，包版本动态读取源码`__version__`；Electron及安装工具使用`desktop/package.json`和锁文件。不复制已安装环境，不另维护Python requirements，也不把作者的Conda绝对路径或历史归档变成协作者条件。
 - 2026-10-20 用户确认默认项目环境名为 `auto-gpu`；文档与 CI 使用该名称，显式选择其他专用环境时须一致替换。先查看 `conda env list`，有效环境直接复用；只在缺失或迁移确有必要时创建。禁止 base、全局 Python、用户 site 及叠加 venv/.venv。
 - Conda 环境可以位于用户可写目录；这与 `pip --user` 的用户 site 安装不同。环境目录不可写时先核实真实权限，再选择可写的 Conda 环境位置；不因安装失败改用 `--user`、全局 Python 或修改 base。
-- 开发者自行准备 Conda，项目不提供安装 EXE、CMD/BAT 包装或自动安装依赖的启动器。命令统一在 PowerShell 中执行；已有命令足够时不增加 PS1。
+- 源码开发者自行准备Conda，本开发链不再添加另一套CMD/BAT包装或自动安装依赖的启动器；已有命令足够时不增加PS1。面向普通用户的安装EXE已由`installer/`实现，走随包运行时；不能将旧源码开发约定解释为禁止当前安装版。
 
 文档中的安装命令前必须说明权限条件、执行目录及成功判据。2026-10-20 已确认管理员拥有的环境更新 editable `.pth` 时，普通窗口可报 `WinError 5`；创建/安装/卸载需要环境写权限，必要时以管理员身份打开 PowerShell 并重新进入仓库。提示符 `(base)` 不代表管理员权限，显式 `conda run -n auto-gpu` 仍选择项目环境。正常运行应用不应一概要求管理员权限；不可建议 `--user` 绕过。
 
@@ -53,7 +53,7 @@ conda run -n auto-gpu --no-capture-output python -s -m pip install --no-user -e 
 conda run -n auto-gpu --no-capture-output python -s tools/build_exe.py --stage-only
 ```
 
-当前构建产物只暂存到 `.tools/build/launcher/AutoDLWatcher.exe`；不自动覆盖根目录程序，不生成邻接 `_internal/`、业务依赖副本或安装包。单文件内部仍有 PyInstaller 启动代码所需的最小运行时，它不作为业务环境。不要把“无需邻接运行时目录”写成“EXE 内不含任何 Python 引导运行时”。普通业务源码修改重开即可生效；启动器实现或嵌入图标变化才需重建。
+此源码轻量启动器构建只暂存到 `.tools/build/launcher/AutoDLWatcher.exe`；不自动覆盖根目录程序，不生成邻接 `_internal/`、业务依赖副本或安装包。单文件内部仍有 PyInstaller 启动代码所需的最小运行时，它不作为业务环境。不要把“无需邻接运行时目录”写成“EXE 内不含任何 Python 引导运行时”。普通业务源码修改重开即可生效；启动器实现或嵌入图标变化才需重建。
 
 验收按本次变化选择有判断价值的检查：
 

@@ -1,6 +1,6 @@
 # 专用规则、AI请求与用量
 
-适用1.0.1的规则生成、完整日志输入、缓存适用性、全局AI设置与账本维护。核对日期2026-10-31；历史实际/模拟证据沿用原验证日期，本轮未调用真实AI。证据定位按需见[归档映射](../../autodl-maintenance/references/windows-and-data.md#历史证据定位)，无需先读配置维护技能。
+适用本项目规则生成、日志输入、缓存身份、AI设置与账本。2026-11-16核对默认Electron由`desktop_backend.DesktopAI`复用AIService，`training.log`与`ai.generate`分别提供读取和生成；后台生成前仍核对确认标志，界面快照不返回密钥。通用供应商参数、模型能力或费用变化要核对当次配置，不由旧默认值推断。下文1.0.1及Tk窗口记录保留2026-10-31等原日期，Tk像素／窗口验证不替代当前Electron，未新增真实AI验证。证据定位按需见[归档映射](../../autodl-maintenance/references/windows-and-data.md#历史证据定位)，无需先读配置维护技能。
 
 ## 规则生成前的任务边界
 

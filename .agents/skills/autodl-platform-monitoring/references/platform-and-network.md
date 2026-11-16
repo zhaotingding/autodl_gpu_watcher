@@ -1,6 +1,6 @@
 # 平台、占用与网络故障
 
-适用AutoDL私有云现有适配器和v0.9.9监控链。2026-10-15迁移时按当前代码核对边界；下列日期与“实际/模拟”来自原记录，不表示本轮重连验证。历史证据前缀及恢复方式见 [Windows与资料维护](../../autodl-maintenance/references/windows-and-data.md#历史证据定位)。
+适用AutoDL私有云适配器、资源新鲜度和电源门控。2026-11-16核对默认Electron通过`desktop_backend.py`调用既有worker；采集与门控契约继续由业务模块负责。下文Treeview、Tk窗口和旧黑框布局只用于`--legacy-tk`或历史证据，不是默认Electron布局要求；默认界面验证见[桌面技能](../../autodl-electron-desktop/SKILL.md)。2026-10-15起的日期与“实际／模拟”保留原范围，此次未重连平台。历史证据前缀及恢复方式见 [Windows与资料维护](../../autodl-maintenance/references/windows-and-data.md#历史证据定位)。
 
 ## 电源请求与额度
 

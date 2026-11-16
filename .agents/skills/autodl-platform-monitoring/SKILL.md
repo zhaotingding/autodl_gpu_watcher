@@ -1,17 +1,16 @@
 ---
 name: autodl-platform-monitoring
-description: 诊断或修改本项目AutoDL平台采集、登录判断、Telemetry重试、逐GPU资源展示、占用归属及自动开机/无卡转换门控时使用；不用于SSH训练识别、AI规则或Windows打包。
+description: 维护本项目 AutoDL 平台采集、站点认证、Telemetry 恢复、GPU 资源与占用归属、电源门控时使用；SSH训练监控、AI规则和桌面布局分别使用对应技能。
 ---
 
-# AutoDL平台监控与电源门控
+# AutoDL平台采集与电源门控
 
-适用本仓库1.0.1平台链；本轮核对日期2026-10-31。详细历史证据保留原验证日期与实际/模拟/待验证状态，当前代码与事实优先。个人任务Skill提供通用方法，本技能只补项目特殊约束；历史记录不授予外部操作权限。
+2026-11-16按现行服务及默认Electron入口校准。这里维护采集与开关机判定，不把旧Tk布局、个人通用训练方法或历史运行结果当成当前平台状态。
 
-## 主要流程
+1. 先分清会话失效、Telemetry认证／传输故障、资源归属不明和电源响应未知，再读[平台与网络](references/platform-and-network.md)的相应章节。Electron页面通过`desktop_backend.py`复用既有worker；界面刷新不能变成额外平台轮询。
+2. 维持完整UUID、账号身份、入口空位与新鲜GPU采样核验。1.0.1已按用户要求移除显存／利用率门槛，不从旧说明恢复。采集前后及额度释放后的最终实例查询各按当时事实判断；仅监控不得进入电源规划。
+3. 站点401/403与AutoDL会话失效分开，配置目标缺失保持可见的未配置状态。网络恢复沿用有界重试／退避及既有代理差异；电源POST不得因超时或结果不明自动重发。Playwright响应释放与requests非stream消费分别处理。
+4. 资源展示保留样本来源、采集时间和未知状态；视图的显示宽限不改变业务新鲜度门槛。物理机回退数据须标明来源，错误不伪造成功采样时间。旧Treeview样式只适用于`--legacy-tk`，当前Electron外观从[桌面技能](../autodl-electron-desktop/SKILL.md)定位。
+5. 按变更选择`test_collectors.py`、`test_platform_resources.py`、`test_telemetry_recovery.py`、`test_autostart.py`或`test_monitor_loop.py`。改Electron入口再核对后台与实际页面；安装链的数据到达验证读取[安装参考](../autodl-windows-build/references/installer.md)。不把Tk、模拟或历史Success当作当前安装版业务通过。
 
-1. 按当前症状读取[平台与网络](references/platform-and-network.md)相应章节，区分会话失效、Telemetry故障、占用不明与电源响应不明，不从同一错误文案推断共同原因。
-2. 修改平台/占用链时分别保留完整UUID和账号身份、入口空位与新鲜GPU采样核验；1.0.1按用户要求移除全部显存/利用率门槛，不能从历史约定恢复。采集前后的检查及额度释放后的最终实例查询各使用当时事实。仅监控不得进入开关机规划。
-3. 处理网络恢复时保持原有限重试/退避与代理差异；平台电源POST不自动重发，Playwright响应释放和requests非stream消费分开判断。
-4. 按修改运行test_collectors.py、test_platform_resources.py、test_telemetry_recovery.py、test_autostart.py或test_monitor_loop.py的相关离线用例；改资源视图时再选test_gpu_resources.py及test_gui_window.py。没有真实外部验证授权时用模拟，不把历史Success当当前成功。
-
-按任务选读，不要求先加载其他项目技能。完整行为契约和既有验收仅在需要时查[重构开发规范](../../../docs/重构开发规范.md)和[验收记录](../../../docs/重构验收记录.md)。
+保留[重构开发规范](../../../docs/重构开发规范.md)中的业务契约。真实平台连接、电源操作和训练各按任务授权，历史实测只作[验收证据](../../../docs/重构验收记录.md)。

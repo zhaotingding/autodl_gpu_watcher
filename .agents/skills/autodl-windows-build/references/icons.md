@@ -2,15 +2,19 @@
 
 仅在导入图标、修改转换/加载/资源更新或诊断显示问题时读取。2026-10-19 按 Conda 源码与轻量 EXE 设计更新；新入口的显示须单独验收，历史实测保持原日期与范围。归档位置按需见[历史证据定位](../../autodl-maintenance/references/windows-and-data.md#历史证据定位)。
 
+## 当前入口分流
+
+2026-11-16按源码与安装入口核对：默认Electron由主进程加载窗口图标，Python后台沿用个人图标选择与转换。安装EXE的PE资源在安装构建时写入，用户更换图标用于窗口／快捷方式，不对已签名安装EXE套用旧轻量启动器的运行后改写。源码轻量EXE只有实际启动器标识确认后才走后文资源同步。旧`ImageTk`／`iconphoto`方法仅用于`--legacy-tk`。
+
 ## 图标的四个环节
 
 - 分清原文件质量、导入转换、框架加载与系统最终显示。用户 ICO 原样保留全部作者帧和小尺寸专用帧；PNG 的 16、20、24、32、40、48、64、128、256 等需要尺寸直接从原图生成，保持比例和透明度，不连续缩小。
-- Tk 窗口、任务栏、Shell 快捷方式与磁盘 EXE 是不同来源；保存成功、API 无报错或尺寸正确不能证明最终显示正确。首次启动和运行中更换分别检查；解码 ICO 各帧后用 `ImageTk.PhotoImage` 与 `root.iconphoto(False, *frames)` 设置窗口，管理 PhotoImage 生命周期。
+- Electron／Tk窗口、任务栏、Shell快捷方式与磁盘EXE是不同来源；保存成功、API 无报错或尺寸正确不能证明最终显示正确。首次启动和运行中更换分别检查；旧Tk解码ICO各帧后用 `ImageTk.PhotoImage` 与 `root.iconphoto(False, *frames)` 设置窗口，管理 PhotoImage 生命周期。
 - Windows `WM_GETICON` 为空时继续查窗口类 `GCLP_HICONSM/HICON`，不能直接判加载失败；必要时比对图标句柄对应像素与实际截图。按用户实际入口与 DPI 验证，不把一次窗口截图当作所有 Shell 入口成功。
 
 ## Conda 源码启动后的目标与生命周期
 
-- 当前 GUI 的 `sys.executable` 是项目 Conda Python，不是主程序 EXE。EXE 图标更新只允许针对 `AUTODL_LAUNCHER_EXE` 标识的实际轻量启动器；不得改写 `python.exe`、`pythonw.exe`，也不能猜测根目录旧 `AutoDLWatcher.exe` 就是当前入口。
+- 源码Python后台的`sys.executable`是项目Conda Python，不是Electron主进程或轻量主程序EXE。EXE 图标更新只允许针对 `AUTODL_LAUNCHER_EXE` 标识的实际轻量启动器；不得改写 `python.exe`、`pythonw.exe`，也不能猜测根目录旧 `AutoDLWatcher.exe` 就是当前入口。
 - 直接源码启动、没有实际启动器标识时，仍可设置窗口图标并保存偏好；不能因此修改任意 EXE。导出的启动快捷方式须保存当前专用 Conda 环境与管理器选择（`--env`、`--conda`），不能在下次双击时落到 base/全局 Python。
 - 窗口先热更新；EXE 同步任务通过同环境的 `python -s -m autodl_watcher.exe_icon` 运行，接收明确 GUI PID 与 EXE 路径，沿用同一资料根，等待 GUI 退出后再改资源。不能再依赖 `_internal/AutoDLWorker.exe`；具体环境检查见[安装与启动参考](packaging.md)。
 - 修改目标副本的 `RT_ICON/RT_GROUP_ICON` 时保留并在新节区末尾重附 PyInstaller 归档，否则单文件启动器可能失效。上次 EXE 备份为资料根下 `.ui/icon-executable-backup.exe`；资源更新后通知 Windows，要求重开或刷新时说明实际生效路径，不删除系统缓存或任务栏固定项。
